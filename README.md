@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/tag/happycodelucky/repixel?style=for-the-badge&logo=github&logoColor=white&label=release&sort=semver)](https://github.com/happycodelucky/repixel/tags)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-blue.svg?style=for-the-badge&logo=apple)
-![Linux](https://img.shields.io/badge/Linux-x86--64-FCC624.svg?style=for-the-badge&logo=linux&logoColor=black)
+![Linux](https://img.shields.io/badge/Linux-ARM64%20%7C%20x86--64-FCC624.svg?style=for-the-badge&logo=linux&logoColor=black)
 [![License: PolyForm Shield 1.0.0](https://img.shields.io/badge/License-PolyForm%20Shield%201.0.0-blue.svg?style=for-the-badge)](LICENSE.md)
 
 Turn blurry, JPEG-damaged or AI-generated "pixel art" back into real pixel art.
