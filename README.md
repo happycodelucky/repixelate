@@ -163,7 +163,7 @@ Reduce each walk cycle to exactly 8 frames:
 | `--preview [N]` | Also save an N× upscale (default: back to the input size). |
 | `--split` | Video: treat each separate sprite as its own animation, covering only the frames where it moves. Needs `-t`. |
 | `--loop` | Video: find the repeating cycle (such as a walk cycle) and keep exactly one. For a walk that is both steps, where the clip shows them cleanly. |
-| `--no-repair` | Video: leave ghosted poses as they are. By default the ghost pixels are painted over from their neighbours, and a badly ghosted pose is left out. |
+| `--no-repair` | Video, with `--split`, `--loop` or `--poses`: leave ghosted poses as they are. By default the ghost pixels are painted over from their neighbours, and a badly ghosted pose is left out. |
 | `--no-vote` | Video, with `--loop`: take the cycle exactly as one pass shows it, without using the other passes to clean it. |
 | `--poses N` | Video: reduce the animation to its N most representative frames, avoiding ghosted ones. |
 | `--sheet` | Video: write a sprite sheet PNG instead of an animation. One column per frame, and with `--split` one row per sprite. |

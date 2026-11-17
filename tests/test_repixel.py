@@ -5,9 +5,11 @@ checked against what the art really is, not against a previous output.
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -469,6 +471,142 @@ class Video(unittest.TestCase):
         code, stdout, _ = run_cli(self.clip, "-t", "--loop", "--poses", "4", "-o", out, "--no-ask")
         self.assertEqual(code, 0)
         self.assertEqual(len(self.frames_of(out)), 4)
+
+
+def animation_args(**over):
+    """The video options `reduce_animation` reads, at their defaults."""
+    base = dict(no_hold=False, loop=False, poses=None, split=False, no_repair=False,
+                no_vote=False, dedupe=0.002)
+    return argparse.Namespace(**{**base, **over})
+
+
+class Regressions(unittest.TestCase):
+    """One test per defect found in code review."""
+
+    def test_background_removal_on_an_image_that_has_alpha(self):
+        art, mask = synth.make_sheet(np.random.default_rng(8), n=2)
+        big = synth.degrade(art, 5.0)
+        alpha = np.full(big.shape[:2], 255, np.uint8)
+        alpha[:10, :10] = 0                                  # a see-through corner
+        rgba = np.dstack([big, alpha])
+        for spec in ("auto", "magenta", "#ff00ff"):
+            r = rp.repixel_image(rgba, rp.Options(transparent=spec))
+            np.testing.assert_array_equal(r.background, synth.MAGENTA, spec)
+            np.testing.assert_array_equal(r.pixels[..., 3] > 0, mask, spec)
+            np.testing.assert_array_equal(r.pixels[..., :3][mask], art[mask], spec)
+        # nothing opaque on the border: nothing to detect, and no failure
+        cut = np.dstack([big, np.where(np.kron(mask, np.ones((5, 5), bool)), 255, 0).astype(np.uint8)])
+        r = rp.repixel_image(cut, rp.Options(transparent="auto"))
+        self.assertIsNone(r.background)
+        np.testing.assert_array_equal(r.pixels[..., 3] > 0, mask)
+
+    def test_explicit_merge_does_not_switch_despill_on_for_a_clean_image(self):
+        art, mask = synth.make_sheet(np.random.default_rng(1))
+        img = synth.degrade(art, 3.0)
+        plain = rp.repixel_image(img, rp.Options(transparent="auto")).pixels
+        for merge in (0.0, 18.0):
+            np.testing.assert_array_equal(
+                rp.repixel_image(img, rp.Options(transparent="auto", merge=merge)).pixels[..., 3], plain[..., 3])
+        np.testing.assert_array_equal(rp.repixel_image(img, rp.Options(transparent="auto", merge=0.0)).pixels, plain)
+
+    def test_gif_with_exactly_256_opaque_colours(self):
+        frames = np.zeros((2, 16, 16, 3), np.uint8)
+        frames[0, ..., 0] = np.arange(256).reshape(16, 16)
+        frames[1, ..., 0] = np.arange(256)[::-1].reshape(16, 16)      # the same colours, moved
+        frames[..., 2] = 7
+        self.assertEqual(len(np.unique(frames.reshape(-1, 3), axis=0)), 256)
+        imgs = rp.gif_frames(frames)
+        self.assertIsNotNone(imgs)
+        for im, f in zip(imgs, frames):
+            np.testing.assert_array_equal(np.asarray(im.convert("RGB")), f)
+
+    def test_plain_video_keeps_things_that_appear_only_briefly(self):
+        frames = np.zeros((20, 16, 16, 3), np.uint8)
+        frames[...] = (40, 90, 60)
+        for t in range(20):                                  # something always moving
+            frames[t, 14, t % 16] = (200, 200, 200)
+        frames[8:12, 4:10, 4:10] = (250, 220, 30)            # on screen for a fifth of the clip
+        frames[8:12, 6:8, 6:8] = (255, 80, 0)
+        out, runs, note = rp.reduce_animation(frames, animation_args(no_hold=True), 24.0)
+        self.assertNotIn("ghost", note)
+        self.assertEqual(sum(runs), 20)
+        np.testing.assert_array_equal(out, frames)
+
+    def test_dropping_ghosts_from_an_animation_that_is_not_a_loop(self):
+        frames = np.arange(6, dtype=np.uint8)[:, None, None, None] * np.ones((6, 2, 2, 3), np.uint8)
+        ghost = np.array([0.5, 0, 0, 0, 0, 0.5])
+        out, runs, _, dropped = rp.drop_ghosts(frames, [3] * 6, ghost, 0.1)
+        self.assertEqual(dropped, 2)
+        np.testing.assert_array_equal(out[:, 0, 0, 0], [1, 2, 3, 4])
+        self.assertEqual(runs, [6, 3, 3, 6])                 # the first frame's time goes forward
+        out, runs, _, dropped = rp.drop_ghosts(frames, [3] * 6, ghost, 0.1, loop=True)
+        self.assertEqual(dropped, 1)                         # in a loop, first and last are neighbours
+        np.testing.assert_array_equal(out[:, 0, 0, 0], [1, 2, 3, 4, 5])
+        self.assertEqual(runs, [3, 3, 3, 3, 6])
+
+    def test_a_sprite_that_crosses_the_canvas_is_still_split_out(self):
+        alpha = np.zeros((12, 10, 60), bool)
+        for t in range(12):
+            alpha[t, 3:7, 12 + 4 * t:16 + 4 * t] = True      # never in one place for long
+        boxes = rp.split_sprites(alpha)
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual((boxes[0][1].start, boxes[0][1].stop), (12, 60))
+        alpha[:, 2:8, 2:7] = True                            # and one that stays put
+        boxes = rp.split_sprites(alpha)
+        self.assertEqual([(b[1].start, b[1].stop) for b in boxes], [(2, 7), (12, 60)])
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs ffmpeg")
+class VideoRegressions(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_unreadable_video_is_reported_not_raised(self):
+        bad = self.tmp / "broken.mp4"
+        bad.write_bytes(b"this is not a video" * 50)
+        code, _, err = run_cli(bad, "--no-ask")
+        self.assertEqual(code, 1)
+        self.assertIn("can't read broken.mp4 as video", err)
+
+    def test_clean_clip_comes_back_exact(self):
+        poses, masks = synth.make_cycle(np.random.default_rng(2), poses=6)
+        big = np.kron(poses, np.ones((1, 6, 6, 1), np.uint8))          # exact 6x upscale
+        clip = self.tmp / "clean.gif"
+        imgs = rp.gif_frames(big)
+        imgs[0].save(clip, save_all=True, append_images=imgs[1:], duration=100, loop=0)
+        out = self.tmp / "out.png"
+        code, stdout, _ = run_cli(clip, "-t", "-o", out, "--no-ask")
+        self.assertEqual(code, 0)
+        self.assertRegex(stdout, r"pixel size 6\.00\d-6\.00\d")
+        with Image.open(out) as im:
+            got = [np.asarray(im.convert("RGBA")) for i in range(im.n_frames) if im.seek(i) is None]
+        self.assertEqual(len(got), 6)
+        for f, pose, mask in zip(got, poses, masks):
+            np.testing.assert_array_equal(f[..., 3] > 0, mask)
+            np.testing.assert_array_equal(f[..., :3][mask], pose[mask])
+
+    def test_video_with_a_rotation_tag(self):
+        poses, _ = synth.make_cycle(np.random.default_rng(2), poses=6)
+        plain, turned = self.tmp / "plain.mp4", self.tmp / "turned.mp4"
+        synth.write_video(plain, poses, list(range(6)) * 2, scale=8.0, hold=3)
+        made = subprocess.run(["ffmpeg", "-v", "error", "-y", "-display_rotation", "90", "-i", str(plain),
+                               "-c", "copy", str(turned)], capture_output=True)
+        if made.returncode != 0 or not turned.exists():
+            self.skipTest("this ffmpeg can't write a rotation tag")
+        w0, h0, _, _ = rp.video_info(plain)
+        w, h, _, _ = rp.video_info(turned)
+        if (w, h) == (w0, h0):
+            self.skipTest("this ffmpeg did not record the rotation")
+        self.assertEqual((w, h), (h0, w0))
+        decoded = list(rp.iter_frames(turned, w, h))
+        self.assertEqual(len(decoded), 36)
+        self.assertEqual(decoded[0].shape, (h, w, 3))
+        code, stdout, _ = run_cli(turned, "-t", "-o", self.tmp / "o.png", "--no-ask")
+        self.assertEqual(code, 0)
+        self.assertRegex(stdout, rf"turned\.mp4: {w}x{h} .*pixel size (7\.99\d|8\.00\d)")
 
 
 class CommandLine(unittest.TestCase):

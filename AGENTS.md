@@ -24,12 +24,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | `tests/synth.py` | Ground truth: procedural pixel art and animations, the damage model (`degrade`), scoring (`score`), a synthetic video writer |
 | `tests/bench.py` | Accuracy benchmark over art × pixel size × damage; prints a table |
 | `tests/data/` | Fixed real-art ground truth for the benchmark (never regenerate it: the scores are only comparable while it stays the same) |
-| `tests/test_repixel.py` | `unittest` suite (41 tests, about 25 s) built on the two files above |
+| `tests/test_repixel.py` | `unittest` suite (50 tests, about 25 s) built on the two files above. The `Regressions` classes hold one test per defect found in code review |
 | `llms.txt` | Usage docs for LLMs/agents |
 | `README.md` | Usage docs for humans, with example images |
 | `docs/` | README example images, and `make_examples.py` which regenerates them from `test/` |
 | `docs/PROGRESS.md` | Version-by-version results: benchmark table and comparison images. `docs/make_progress.py` regenerates the images in `docs/progress/` by running each earlier version from git history on the same inputs |
 | `requirements.txt` | numpy, Pillow |
+| `.github/workflows/tests.yml` | CI: the test suite on Ubuntu and macOS (Python 3.10 and 3.13) from a `pip install .`, and a macOS job that installs and tests the Homebrew formula |
+| `Formula/repixel.rb` | Homebrew formula, served from this repository as a tap. It installs `repixel.py` and a wrapper that runs it on Homebrew's Python with Homebrew's numpy and Pillow |
 | `test/` | Real sample inputs: two Gemini JPEGs (trees, soldier sheet) and one Gemini mp4 (walking soldiers) |
 | `out/` | Scratch outputs from manual runs; git-ignored, safe to delete |
 
@@ -63,7 +65,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ## Design rules
 
 - **Outputs must be lossless.** Never let Pillow quantise behind your back: `Image.quantize` and RGB→P conversion can shift colours. Build palettes explicitly, as `to_image` and `gif_frames` do.
-- **Clean input must come back exact.** Every cleanup step measures whether there is anything to clean (noise sigma, blends, spill) and does nothing when there isn't. The `clean` benchmark row must stay at 1.0000 / palette 1.00.
+- **Clean input must come back exact, video included.** Every cleanup step measures whether there is anything to clean (noise sigma, blends, spill) and does nothing when there isn't. The `clean` benchmark row must stay at 1.0000 / palette 1.00, and `test_clean_clip_comes_back_exact` covers the video path (despill and the flicker filter are skipped when the measured noise is zero).
+- **Ghost repair is for sprite animations only.** It runs with `--split`, `--loop` or `--poses`. On an ordinary clip, colours that come and go are things arriving and leaving, and painting them over destroys them.
 - **Transparency is binary.** The user explicitly rejected blended or partial alpha at edges. Edge cleanup is a colour-threshold cut plus despill (recolour, or cut).
 - **Measure, don't eyeball alone.** Change detection, sampling, palette or keying only with `tests/bench.py` before and after. Then also look at the real images: the benchmark's damage model is not everything AI art does.
 - **Stay vectorised.** Use numpy; keep Python loops to per-frame, per-cluster or per-lag work.
@@ -94,6 +97,9 @@ Rewriting in a compiled language or moving to the GPU was considered and rejecte
 - **Loop rules each fail alone.** The deepest dip is fooled by a still start matching a still end, and prefers three steps to two. The shortest clear dip is fooled by partial repeats (a bob every other pose). Measuring in poses instead of time breaks when holds vary (2 to 6 frames in the test clip). And a full walk cycle must join about as well as one step, or a soldier with one clean pass gets a loop with a bad seam.
 - **A standing sprite "loops" perfectly.** `find_loop` picks its start by closure relative to how much happens inside the cycle, or it lands on a motionless stretch.
 - **`np.nanpercentile` is extremely slow** on stacked windows (a Python-level loop per column). Sort and index instead.
+- **An image's own alpha changes what "the image" is.** Anything that looks at pixels (background detection, colour snapping) must be given the full (h, w) image plus a mask of the pixels that count, never `rgb[mask]`, which is a flat list.
+- **ffmpeg rotates on decode.** A stream stored 1920×1080 with a 90° rotation tag comes out 1080×1920. `video_info` swaps the sides to match.
+- **This Mac's Homebrew belongs to another account** (`/opt/homebrew` is owned by `paulbates`, sessions run as `paul`), so `brew` cannot install here. The formula is verified by the `homebrew` CI job instead.
 - **zsh doesn't word-split** `$VAR` holding a command. Use a shell function for repeated commands.
 
 ## Verifying changes
@@ -149,7 +155,12 @@ Then look at the results. The numbers alone don't catch visual regressions.
 - Composite transparent ones on a dark background `(24,24,28)` as well as grey `(120,120,120)`: light specks and leftover tint at edges only show on dark.
 - For GIF/APNG changes, decode every frame and diff against `--frames` PNGs: zero mismatched pixels is required (the test suite does this on a synthetic clip).
 
-The installable package is checked by hand: `pip install .` into a fresh venv, then `repixel --version`. Bump `__version__` in `repixel.py` with each recorded version.
+## Releasing
+
+1. Bump `__version__` in `repixel.py`, commit and push.
+2. Tag the commit `vX.Y.Z` and push the tag.
+3. Download `https://github.com/happycodelucky/repixel/archive/refs/tags/vX.Y.Z.tar.gz`, take its `sha256`, and put the new `url` and `sha256` in `Formula/repixel.rb`. Hash the file GitHub serves: `git archive` gives a different hash.
+4. Commit and push. CI then checks the pip install and tests on Ubuntu and macOS, and installs and tests the formula on macOS.
 
 When a change moves the benchmark or the real-file results, record it as a new version: commit it, add the previous version's commit to `VERSIONS` in `docs/make_progress.py` and bump `CURRENT`, run the script, and add a row and a section to `docs/PROGRESS.md` (and the short table in `README.md`).
 

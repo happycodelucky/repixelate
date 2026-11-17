@@ -45,6 +45,23 @@ Still images are unchanged. This version is about getting clean, complete loops 
 
 Ghosts made of the sprite's normal colours (a doubled helmet outline, say) are not detected and remain.
 
+### 0.3.1: code review fixes
+
+A review of the whole tool found ten defects, each now fixed and covered by a test that fails on the old code:
+
+- `-t` on an image that already has transparency failed outright.
+- Ghost repair ran on every video and could paint over anything that was only on screen briefly. It now runs only for sprite animations (`--split`, `--loop`, `--poses`).
+- A clean, lossless clip did not come back exact, because edge clean-up ran regardless. Video now follows the same rule as still images.
+- `--merge` on a clean image switched edge clean-up back on.
+- Dropping a ghosted first frame of a non-looping animation moved its time to the end.
+- `--split` reported nothing left when a sprite travelled across the canvas.
+- GIF export failed with exactly 256 colours and no transparency.
+- A file that is not really a video produced a Python traceback instead of an error message.
+- Videos with a rotation tag were decoded with their sides swapped.
+- Video kept every frame in memory at about eight times the size needed.
+
+The test suite also now runs on Linux and macOS on every push.
+
 ## v2
 
 Detection, colour cleanup, background removal and video handling were reworked against the benchmark.

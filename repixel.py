@@ -49,7 +49,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # --------------------------------------------------------------------------- #
 # Options and results
@@ -405,11 +405,6 @@ def _sample_box(xs: np.ndarray, ys: np.ndarray) -> tuple[int, int]:
     return max(1, int(np.median(np.diff(xs)) * 0.5)), max(1, int(np.median(np.diff(ys)) * 0.5))
 
 
-def sample_count(xs: np.ndarray, ys: np.ndarray) -> int:
-    bw, bh = _sample_box(xs, ys)
-    return bw * bh
-
-
 def sample_cells(img: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     """Median colour of the centre region of every cell."""
     h, w, _ = img.shape
@@ -539,7 +534,7 @@ def _greedy_clusters(cols: np.ndarray, weight: np.ndarray, order: np.ndarray, to
     return assign, total / np.maximum(mass, 1e-9)[:, None], mass
 
 
-def merge_similar(cells: np.ndarray, tol: float, tight: float | None = None) -> np.ndarray:
+def merge_map(cells: np.ndarray, tol: float, tight: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Merge colours that differ only by noise.
 
     Two passes, both greedy with the commonest colours first:
@@ -549,22 +544,35 @@ def merge_similar(cells: np.ndarray, tol: float, tight: float | None = None) -> 
          clears noise tails and one-off blends, while two shades that are both in
          real use stay separate even when they are close.
     `tight` defaults to tol * MERGE_TIGHT / MERGE_WIDE.
+
+    Returns (index, palette): `index` gives, for every cell in order, its row in
+    `palette`, the merged colours (float). All the work is done on the distinct
+    colours, so memory stays small however many cells there are.
     """
     flat = cells.reshape(-1, 3)
-    q = np.round(flat).astype(np.int64)
+    if flat.dtype != np.uint8:
+        flat = np.clip(np.round(flat), 0, 255)
+    key = ((flat[:, 0].astype(np.uint32) << 16) | (flat[:, 1].astype(np.uint32) << 8)
+           | flat[:, 2].astype(np.uint32))
+    ukey, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
+    ukey = ukey.astype(np.int64)
+    uniq = np.stack([ukey >> 16, (ukey >> 8) & 255, ukey & 255], axis=1).astype(float)
     if tol <= 0:
-        return q.reshape(cells.shape).astype(float)
+        return inv, uniq
     if tight is None:
         tight = tol * MERGE_TIGHT / MERGE_WIDE
-    key = (q[:, 0] << 16) | (q[:, 1] << 8) | q[:, 2]
-    ukey, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
-    uniq = np.stack([ukey >> 16, (ukey >> 8) & 255, ukey & 255], axis=1).astype(float)
     coarse = ((ukey >> 19) << 10) | (((ukey >> 11) & 31) << 5) | ((ukey >> 3) & 31)
     _, cinv = np.unique(coarse, return_inverse=True)
     density = np.bincount(cinv, weights=counts)[cinv]
     a1, mean1, mass1 = _greedy_clusters(uniq, counts.astype(float), np.lexsort((-counts, -density)), tight)
     a2, mean2, _ = _greedy_clusters(mean1, mass1, np.argsort(-mass1, kind="stable"), tol, STRAGGLER)
-    return mean2[a2[a1[inv]]].reshape(cells.shape)
+    return inv, mean2[a2[a1]]
+
+
+def merge_similar(cells: np.ndarray, tol: float, tight: float | None = None) -> np.ndarray:
+    """The cells with colours that differ only by noise merged (see `merge_map`)."""
+    inv, palette = merge_map(cells, tol, tight)
+    return palette[inv].reshape(cells.shape)
 
 
 def kmeans_quantize(cells: np.ndarray, k: int, iters: int = 30, seed: int = 0) -> np.ndarray:
@@ -642,9 +650,15 @@ def clean_colors(cells: np.ndarray, tol: float, colors: int | None = None) -> np
 # Transparency
 # --------------------------------------------------------------------------- #
 
-def detect_background(img: np.ndarray) -> np.ndarray:
-    """Most common (coarsely quantised) colour along the image border."""
+def detect_background(img: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray | None:
+    """Most common (coarsely quantised) colour along the image border. `valid` marks the
+    pixels that count (the opaque ones of an image with alpha); None is returned when
+    none of the border counts."""
     border = np.concatenate([img[0], img[-1], img[:, 0], img[:, -1]]).reshape(-1, 3)
+    if valid is not None:
+        border = border[np.concatenate([valid[0], valid[-1], valid[:, 0], valid[:, -1]])]
+        if len(border) == 0:
+            return None
     q = (border // 16).astype(int)
     keys, inv, counts = np.unique(q, axis=0, return_inverse=True, return_counts=True)
     top = np.argmax(counts)
@@ -665,15 +679,18 @@ def parse_color(s: str) -> np.ndarray:
         raise ValueError(f"can't read colour {s!r} (try ff00ff, #ff00ff or magenta)") from None
 
 
-def resolve_background(spec: str, img: np.ndarray) -> np.ndarray:
+def resolve_background(spec: str, img: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray | None:
     """Background colour: auto-detected, or the given colour snapped to what the image
-    really contains (JPEG shifts flat colours, e.g. ff00ff often becomes fd33f8)."""
+    really contains (JPEG shifts flat colours, e.g. ff00ff often becomes fd33f8).
+    `valid` (h, w) marks the pixels to look at. None means there is nothing to detect."""
     if spec == "auto":
-        return detect_background(img)
+        return detect_background(img, valid)
     want = parse_color(spec)
     px = img[::3, ::3].reshape(-1, 3)
+    if valid is not None:
+        px = px[valid[::3, ::3].reshape(-1)]
     near = px[np.sqrt(((px - want) ** 2).sum(1)) <= 100]
-    return np.median(near, axis=0) if len(near) >= 0.01 * len(px) else want
+    return np.median(near, axis=0) if len(near) and len(near) >= 0.01 * len(px) else want
 
 
 def _border_connected(mask: np.ndarray) -> np.ndarray:
@@ -876,17 +893,19 @@ def repixel_image(img: np.ndarray, opts: Options | None = None,
     ys, _ = grid_lines(profs[1], sy, h, opts.snap)
     raw = sample_cells(rgb, xs, ys)
     err = reconstruction_error(rgb, raw, xs, ys)
-    tol = opts.merge if opts.merge is not None else merge_tolerance(noise_level(rgb, xs, ys))
+    sigma = noise_level(rgb, xs, ys)
+    tol = opts.merge if opts.merge is not None else merge_tolerance(sigma)
     out = clean_colors(raw, tol, opts.colors)
 
     bg = None
     if opts.transparent:
-        bg = resolve_background(opts.transparent, rgb if alpha is None else rgb[alpha >= 128])
+        bg = resolve_background(opts.transparent, rgb, None if alpha is None else alpha >= 128)
+    if bg is not None:
         out = key_background(out, bg, opts.key_tol, opts.key == "contiguous")
         # Smearing needs noise or blur: a clean image has none, so any background-like
         # hue at an edge is part of the art. It only reaches a second ring of cells
         # when cells are small.
-        if opts.despill and (tol > 0 or opts.merge is not None):
+        if opts.despill and sigma > 0:
             out = despill(out, bg, near=2 if min(sx, sy) < 4 else 1)
     if alpha is not None:
         a = sample_cells(alpha[..., None], xs, ys)[..., 0] >= 128
@@ -929,8 +948,10 @@ def gif_frames(frames: np.ndarray) -> list[Image.Image] | None:
     limit = 255 if rgba else 256
     if len(uniq) > limit:
         return None
-    idx = np.full(len(flat), len(uniq), np.uint8)
+    idx = np.zeros(len(flat), np.uint8)
     idx[opaque] = inv.reshape(-1)
+    if rgba:
+        idx[~opaque] = len(uniq)            # at most 255, checked above
     idx = idx.reshape(frames.shape[:3])
     pal = uniq.astype(np.uint8)
     if rgba:
@@ -1299,10 +1320,11 @@ def _ghosted(score: np.ndarray) -> np.ndarray:
     return score > _ghost_limit(score)
 
 
-def drop_ghosts(frames: np.ndarray, runs: list[int], ghost: np.ndarray,
-                limit: float) -> tuple[np.ndarray, list[int], np.ndarray, int]:
+def drop_ghosts(frames: np.ndarray, runs: list[int], ghost: np.ndarray, limit: float,
+                loop: bool = False) -> tuple[np.ndarray, list[int], np.ndarray, int]:
     """Leave out the frames whose ghost score is over `limit`, showing the frame before
-    for longer.
+    for longer (in a `loop` the frame before the first is the last; otherwise a dropped
+    first frame gives its time to the frame after it).
 
     Repair removes a ghost's odd colours, but a frame that was badly ghosted is still a
     muddle of two poses. Dropping it costs one step of motion and keeps the animation
@@ -1312,15 +1334,19 @@ def drop_ghosts(frames: np.ndarray, runs: list[int], ghost: np.ndarray,
     T = frames.shape[0]
     heavy = ghost > limit
     keep = np.ones(T, bool)
+    def kept(i: int) -> bool:                      # is the neighbour at i staying?
+        return keep[i % T] if loop else not 0 <= i < T or keep[i]
+
     for t in np.argsort(-ghost):
-        if heavy[t] and keep.sum() > 3 and keep[t - 1] and keep[(t + 1) % T]:
+        if heavy[t] and keep.sum() > 3 and kept(t - 1) and kept(t + 1):
             keep[t] = False
     if keep.all():
         return frames, runs, ghost, 0
     runs = list(runs)
     for t in np.nonzero(~keep)[0]:                 # its time goes to the kept frame before it
-        prev = next(i for i in ((t - k) % T for k in range(1, T)) if keep[i])
-        runs[prev] += runs[t]
+        before = [(t - k) % T for k in range(1, T)] if loop else list(range(t - 1, -1, -1))
+        after = list(range(t + 1, T))
+        runs[next(i for i in before + after if keep[i])] += runs[t]
     return frames[keep], [r for r, k in zip(runs, keep) if k], ghost[keep], int((~keep).sum())
 
 
@@ -1480,9 +1506,7 @@ def split_sprites(alpha: np.ndarray) -> list[tuple[slice, slice, np.ndarray]]:
         left &= ~blob
         sizes.append(int(blob.sum()))
         lab[blob] = len(sizes)
-    if not sizes:
-        return []
-    keep = [k + 1 for k, n in enumerate(sizes) if n >= max(6, 0.1 * max(sizes))]
+    keep = [k + 1 for k, n in enumerate(sizes) if n >= max(6, 0.1 * max(sizes))] if sizes else []
     lab[~np.isin(lab, keep)] = 0
     while True:                                  # grow every sprite into what it ever covers
         p = np.pad(lab, 1)
@@ -1495,6 +1519,23 @@ def split_sprites(alpha: np.ndarray) -> list[tuple[slice, slice, np.ndarray]]:
         if (new == lab).all():
             break
         lab = new
+    # Whatever is left belongs to something that is never in one place for long (a
+    # sprite crossing the canvas): each connected area it sweeps is a sprite of its own.
+    left = ever & (lab == 0)
+    floor = max(6, 0.1 * max(sizes)) if keep else 6
+    while left.any():
+        y, x = np.unravel_index(int(np.argmax(left)), left.shape)
+        blob = np.zeros_like(left)
+        blob[y, x] = True
+        while True:
+            grow = _neighbourhood(blob, 1) & left
+            if (grow == blob).all():
+                break
+            blob = grow
+        left &= ~blob
+        if blob.sum() >= floor:
+            keep.append(max(keep, default=0) + 1)
+            lab[blob] = keep[-1]
     boxes = []
     for k in keep:
         m = lab == k
@@ -1520,15 +1561,32 @@ MAX_ANALYSIS_FRAMES = 480      # loop / pose analysis is cubic in the frame coun
 
 
 def video_info(path: Path) -> tuple[int, int, float, int]:
+    """(width, height, frames per second, frame count) of a video as ffmpeg will decode
+    it. Raises ValueError if the file can't be read as video."""
     r = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
-         "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,nb_read_packets",
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
+         "stream=width,height,avg_frame_rate,r_frame_rate,nb_read_packets"
+         ":stream_tags=rotate:stream_side_data=rotation",
          "-of", "json", str(path)],
-        capture_output=True, text=True, check=True)
-    st = json.loads(r.stdout)["streams"][0]
-    num, den = (st.get("avg_frame_rate") or st["r_frame_rate"]).split("/")
+        capture_output=True, text=True)
+    try:
+        st = json.loads(r.stdout)["streams"][0]
+        w, h = int(st["width"]), int(st["height"])
+        num, den = (st.get("avg_frame_rate") or st["r_frame_rate"]).split("/")
+    except (ValueError, KeyError, IndexError):
+        why = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "no video stream found"
+        raise ValueError(f"can't read {path.name} as video ({why})") from None
     fps = float(num) / float(den) if float(den) else 24.0
-    return int(st["width"]), int(st["height"]), fps, int(st.get("nb_read_packets", 0))
+    # ffmpeg turns the picture upright when it decodes, so a quarter turn swaps the sides.
+    turns = [d.get("rotation") for d in st.get("side_data_list", [])] + [st.get("tags", {}).get("rotate")]
+    for turn in turns:
+        try:
+            if round(abs(float(turn))) % 180 == 90:
+                w, h = h, w
+            break
+        except (TypeError, ValueError):
+            continue
+    return w, h, fps, int(st.get("nb_read_packets", 0))
 
 
 def iter_frames(path: Path, w: int, h: int, fps: float | None = None):
@@ -1614,15 +1672,21 @@ def reduce_animation(frames: np.ndarray, args, fps: float) -> tuple[np.ndarray, 
         frames = frames[::step]
     ghost = np.zeros(frames.shape[0])
     heavy = np.inf                      # ghost score beyond which a pose is left out
-    if not args.no_repair and frames.shape[0] >= 4:
+    # Ghosts are told by colours that come and go. That only means something for a sprite
+    # being animated (one --split out, or a clip being cut to a loop or to a few poses).
+    # In an ordinary clip, colours come and go because things do.
+    repair = not args.no_repair and (args.split or args.loop or args.poses)
+    if repair and frames.shape[0] >= 4:
         frames, ghost, repaired = repair_ghosts(frames)
         heavy = GHOST_DROP * _ghost_limit(ghost)
         if repaired:
             notes.append(f"{repaired} ghosted repaired")
+    looped = False
     if args.loop and frames.shape[0] >= 4:
         D = frame_distances(frames)
         lp = find_loop(D, max(3, int(round(0.25 * fps))), runs)
         if lp:
+            looped = True
             cycle = slice(lp[0], lp[0] + lp[1])
             notes.append(f"loop of {lp[1]}")
             if args.no_vote:
@@ -1636,8 +1700,8 @@ def reduce_animation(frames: np.ndarray, args, fps: float) -> tuple[np.ndarray, 
             runs, ghost = runs[cycle], ghost[cycle]
         else:
             notes.append("no loop found")
-    if not args.no_repair:
-        frames, runs, ghost, dropped = drop_ghosts(frames, runs, ghost, heavy)
+    if repair:
+        frames, runs, ghost, dropped = drop_ghosts(frames, runs, ghost, heavy, loop=looped)
         if dropped:
             notes.append(f"{dropped} ghosted dropped")
     if args.poses and frames.shape[0] > args.poses:
@@ -1658,7 +1722,6 @@ def process_video(args, opts: Options) -> int:
     import os
     w, h, src_fps, total = video_info(args.input)
     fps = args.fps or src_fps
-    args.out_fps = fps
     if args.fps:
         total = int(round(total * args.fps / src_fps))
     n = max(w, h)
@@ -1728,7 +1791,8 @@ def process_video(args, opts: Options) -> int:
         xs, kx = grid_lines(profs[t][0], p_x, w, opts.snap, ox)
         ys, ky = grid_lines(profs[t][1], p_y, h, opts.snap, oy)
         sigma = noise_level(img, xs, ys) if t == ref else 0.0
-        return sample_cells(img, xs, ys), kx, ky, (cx - ox) / p_x, (cy - oy) / p_y, sigma
+        cells = np.clip(np.round(sample_cells(img, xs, ys)), 0, 255).astype(np.uint8)
+        return cells, kx, ky, (cx - ox) / p_x, (cy - oy) / p_y, sigma
 
     frames, origins = [], []
     ax_prev = ay_prev = None
@@ -1760,7 +1824,7 @@ def process_video(args, opts: Options) -> int:
     else:
         Y0, Y1, X0, X1 = y0s.min(), y1s.max(), x0s.min(), x1s.max()
     H, W = int(Y1 - Y0), int(X1 - X0)
-    stack = np.zeros((nframes, H, W, 3), np.float32)
+    stack = np.zeros((nframes, H, W, 3), np.uint8)
     covered = np.zeros((nframes, H, W), bool)
     for i, (f, (oy_, ox_)) in enumerate(zip(frames, origins)):
         ya, xa = oy_ - Y0, ox_ - X0
@@ -1775,9 +1839,11 @@ def process_video(args, opts: Options) -> int:
     tol = opts.merge if opts.merge is not None else merge_tolerance(sigma)
     if opts.colors:
         rgb = np.clip(np.round(kmeans_quantize(stack.reshape(nframes * H, W, 3), opts.colors)), 0, 255)
+        rgb = rgb.astype(np.uint8).reshape(nframes, H, W, 3)
     else:
-        rgb = np.clip(np.round(merge_similar(stack.reshape(nframes * H, W, 3), tol)), 0, 255)
-    rgb = rgb.astype(np.uint8).reshape(nframes, H, W, 3)
+        index, palette = merge_map(stack, tol)
+        rgb = np.clip(np.round(palette), 0, 255).astype(np.uint8)[index].reshape(nframes, H, W, 3)
+    del stack
     if not opts.colors:
         for i in range(nframes):
             rgb[i] = absorb_blends(rgb[i], tol)
@@ -1791,7 +1857,8 @@ def process_video(args, opts: Options) -> int:
         else:
             out = np.concatenate([rgb, np.full((*rgb.shape[:3], 1), 255, np.uint8)], -1)
         out[~covered] = 0
-        if opts.transparent and opts.despill:
+        # as for still images: a clean clip has nothing smeared onto its edges
+        if opts.transparent and opts.despill and sigma > 0:
             near = 2 if px_t.min() * min(1.0, aspect) < 4 else 1
             for i in range(nframes):
                 out[i] = despill(out[i], bg, near=near)
@@ -1801,7 +1868,7 @@ def process_video(args, opts: Options) -> int:
     else:
         out = rgb
 
-    if not args.no_deblip and nframes >= 3:
+    if not args.no_deblip and nframes >= 3 and sigma > 0:      # a clean clip has no flicker
         absorb_temporal_blends(out)
 
     print(f"{args.input.name}: {w}x{h} {src_fps:g}fps"
@@ -1883,7 +1950,10 @@ def ask_period(cands: list[Candidate], w: int, h: int) -> float:
               f"(confidence {c.score:.2f})", file=sys.stderr)
     while True:
         print(f"Pick 1-{len(cands)}, or type a size [1]: ", end="", file=sys.stderr, flush=True)
-        ans = input().strip()
+        try:
+            ans = input().strip()
+        except EOFError:                        # nothing to read: take the first
+            ans = ""
         if not ans:
             return cands[0].period
         try:
@@ -2057,7 +2127,7 @@ def main(argv=None) -> int:
         if args.input.suffix.lower() in VIDEO_EXTS:
             return process_video(args, opts)
         return process_image(args, opts)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, ArithmeticError, subprocess.SubprocessError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
