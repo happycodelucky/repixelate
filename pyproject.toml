@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ dynamic = ["version"]
 description = "Recover true-resolution pixel art from upscaled, JPEG-damaged or AI-generated images and video"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+license-files = ["LICENSE.md"]
 dependencies = ["numpy>=2.0", "pillow>=10.0"]
 keywords = ["pixel-art", "sprites", "sprite-sheet", "upscaling", "image-processing"]
 

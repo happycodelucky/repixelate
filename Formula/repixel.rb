@@ -3,6 +3,8 @@ class Repixel < Formula
   homepage "https://github.com/happycodelucky/repixel"
   url "https://github.com/happycodelucky/repixel/archive/refs/tags/v0.3.1.tar.gz"
   sha256 "f833c8fa49e81b9c9cafd2a35873504c4f5daf701c506a298fad497131b8a821"
+  # PolyForm Shield License 1.0.0 (see LICENSE.md), which has no SPDX identifier.
+  license :cannot_represent
   head "https://github.com/happycodelucky/repixel.git", branch: "main"
 
   depends_on "numpy"

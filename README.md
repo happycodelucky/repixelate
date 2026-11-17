@@ -237,6 +237,15 @@ See [docs/PROGRESS.md](docs/PROGRESS.md) for the full comparison, including back
 
 The tests build pixel art with a known answer, damage it the way upscaling, blur, JPEG and video compression do, and check what Repixel recovers against the original. `tests/bench.py` prints the full accuracy table.
 
+## Licence
+
+Repixel is released under the [PolyForm Shield License 1.0.0](LICENSE.md). It is source-available, not open source.
+
+- You may use it, change it and share it, including for commercial work. The licence covers the tool, not the images you make with it.
+- You may not use it to provide a product or service that competes with Repixel, such as a hosted pixel-art clean-up service or an app that is a substitute for it.
+
+Copyright 2026 Paul Bates.
+
 ## For AI agents
 
 - [llms.txt](llms.txt): how to use Repixel (commands, output format, settings).

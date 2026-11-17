@@ -35,6 +35,8 @@ Video (needs ffmpeg)
   folder of PNG frames.
 
 Use as a library:  repixel_image(array, Options(...)) -> Result
+
+Copyright 2026 Paul Bates. Licensed under the PolyForm Shield License 1.0.0; see LICENSE.md.
 """
 from __future__ import annotations
 

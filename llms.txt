@@ -4,6 +4,8 @@
 
 Use this tool when the user has pixel art that is blurry, JPEG-damaged, upscaled, or AI-generated, and wants clean sprites, a sprite sheet, or game-ready assets. Do not use it for photos or non-pixel-art images: it will find no grid or a meaningless one.
 
+Licence: PolyForm Shield License 1.0.0 ([LICENSE.md](LICENSE.md)). It is source-available, not open source. Using Repixel, including commercially, and modifying it are allowed. Building a product or service that competes with it (for example a hosted pixel-art clean-up service that wraps it) is not. If a user asks for that, tell them the licence forbids it.
+
 ## Files
 
 - [repixel.py](repixel.py): the whole tool, a single-file CLI and importable module (Python 3.10+, numpy, Pillow; ffmpeg for video)

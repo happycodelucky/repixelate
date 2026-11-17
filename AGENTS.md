@@ -30,6 +30,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | `docs/` | README example images, and `make_examples.py` which regenerates them from `test/` |
 | `docs/PROGRESS.md` | Version-by-version results: benchmark table and comparison images. `docs/make_progress.py` regenerates the images in `docs/progress/` by running each earlier version from git history on the same inputs |
 | `requirements.txt` | numpy, Pillow |
+| `LICENSE.md` | PolyForm Shield License 1.0.0, the official text unchanged, under a `Required Notice:` copyright line. Don't edit the text |
 | `.github/workflows/tests.yml` | CI: the test suite on Ubuntu and macOS (Python 3.10 and 3.13) from a `pip install .`, and a macOS job that installs and tests the Homebrew formula |
 | `Formula/repixel.rb` | Homebrew formula, served from this repository as a tap. It installs `repixel.py` and a wrapper that runs it on Homebrew's Python with Homebrew's numpy and Pillow |
 | `test/` | Real sample inputs: two Gemini JPEGs (trees, soldier sheet) and one Gemini mp4 (walking soldiers) |
@@ -71,6 +72,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 - **Measure, don't eyeball alone.** Change detection, sampling, palette or keying only with `tests/bench.py` before and after. Then also look at the real images: the benchmark's damage model is not everything AI art does.
 - **Stay vectorised.** Use numpy; keep Python loops to per-frame, per-cluster or per-lag work.
 - **Single file, minimal dependencies** (numpy, Pillow, optional ffmpeg). No scipy or OpenCV.
+- **Licence.** The project is PolyForm Shield 1.0.0: free to use and modify, not to be turned into a competing product or service. It has no SPDX identifier, so `pyproject.toml` uses `LicenseRef-PolyForm-Shield-1.0.0` and the Homebrew formula uses `license :cannot_represent`. Don't copy code in from projects whose licences don't allow relicensing this way (GPL code, for example).
 - **CLI output stays parseable.** Results go to stdout in the formats shown in `llms.txt`. Warnings, progress, prompts and the `background #rrggbb` line go to stderr. Never prompt when stdin is not a TTY.
 
 ## Why it is still Python
