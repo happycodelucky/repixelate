@@ -1,7 +1,7 @@
 # Repixel
 
-[![CI](https://img.shields.io/github/actions/workflow/status/happycodelucky/repixel/tests.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/happycodelucky/repixel/actions/workflows/tests.yml)
-[![Release](https://img.shields.io/github/v/tag/happycodelucky/repixel?style=for-the-badge&logo=github&logoColor=white&label=release&sort=semver)](https://github.com/happycodelucky/repixel/tags)
+[![CI](https://img.shields.io/github/actions/workflow/status/happycodelucky/repixelate/tests.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/happycodelucky/repixelate/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/tag/happycodelucky/repixelate?style=for-the-badge&logo=github&logoColor=white&label=release&sort=semver)](https://github.com/happycodelucky/repixelate/tags)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-blue.svg?style=for-the-badge&logo=apple)
 ![Linux](https://img.shields.io/badge/Linux-ARM64%20%7C%20x86--64-FCC624.svg?style=for-the-badge&logo=linux&logoColor=black)
@@ -49,19 +49,19 @@ You need Python 3.10 or newer. For video you also need [ffmpeg](https://ffmpeg.o
 With pip:
 
 ```bash
-pip install git+https://github.com/happycodelucky/repixel
+pip install git+https://github.com/happycodelucky/repixelate
 ```
 
 Or with [uv](https://docs.astral.sh/uv/), which keeps it in its own environment:
 
 ```bash
-uv tool install git+https://github.com/happycodelucky/repixel
+uv tool install git+https://github.com/happycodelucky/repixelate
 ```
 
 Or with Homebrew, which also installs ffmpeg:
 
 ```bash
-brew tap happycodelucky/repixel https://github.com/happycodelucky/repixel
+brew tap happycodelucky/repixel https://github.com/happycodelucky/repixelate
 ```
 
 ```bash

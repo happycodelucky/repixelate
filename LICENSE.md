@@ -1,4 +1,4 @@
-Required Notice: Copyright 2026 Paul Bates (https://github.com/happycodelucky/repixel)
+Required Notice: Copyright 2026 Paul Bates (https://github.com/happycodelucky/repixelate)
 
 # PolyForm Shield License 1.0.0
 

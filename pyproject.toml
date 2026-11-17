@@ -17,7 +17,7 @@ keywords = ["pixel-art", "sprites", "sprite-sheet", "upscaling", "image-processi
 repixel = "repixel:main"
 
 [project.urls]
-Homepage = "https://github.com/happycodelucky/repixel"
+Homepage = "https://github.com/happycodelucky/repixelate"
 
 [tool.setuptools]
 py-modules = ["repixel"]

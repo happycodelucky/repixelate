@@ -2,6 +2,8 @@
 
 Repixel recovers true-resolution pixel art from upscaled, JPEG-damaged or AI-generated images and videos.
 
+The GitHub repository is `happycodelucky/repixelate`. The tool, its command, the Python package and the Homebrew formula are all still called `repixel`.
+
 **To use the tool** (commands, flags, reading the output, choosing settings), read [llms.txt](llms.txt). That file is the user-facing documentation for LLMs and agents. Keep it in sync whenever the CLI changes.
 
 This file is for agents **changing the code**.
@@ -161,7 +163,7 @@ Then look at the results. The numbers alone don't catch visual regressions.
 
 1. Bump `__version__` in `repixel.py`, commit and push.
 2. Tag the commit `vX.Y.Z` and push the tag.
-3. Download `https://github.com/happycodelucky/repixel/archive/refs/tags/vX.Y.Z.tar.gz`, take its `sha256`, and put the new `url` and `sha256` in `Formula/repixel.rb`. Hash the file GitHub serves: `git archive` gives a different hash.
+3. Download `https://github.com/happycodelucky/repixelate/archive/refs/tags/vX.Y.Z.tar.gz`, take its `sha256`, and put the new `url` and `sha256` in `Formula/repixel.rb`. Hash the file GitHub serves: `git archive` gives a different hash. The archive's top folder is named after the repository, so the hash also changes if the repository is ever renamed.
 4. Commit and push. CI then checks the pip install and tests on Ubuntu and macOS, and installs and tests the formula on macOS.
 
 When a change moves the benchmark or the real-file results, record it as a new version: commit it, add the previous version's commit to `VERSIONS` in `docs/make_progress.py` and bump `CURRENT`, run the script, and add a row and a section to `docs/PROGRESS.md` (and the short table in `README.md`).

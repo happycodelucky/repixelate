@@ -1,11 +1,11 @@
 class Repixel < Formula
   desc "Recover true-resolution pixel art from upscaled or AI-generated images and video"
-  homepage "https://github.com/happycodelucky/repixel"
-  url "https://github.com/happycodelucky/repixel/archive/refs/tags/v0.3.1.tar.gz"
-  sha256 "f833c8fa49e81b9c9cafd2a35873504c4f5daf701c506a298fad497131b8a821"
+  homepage "https://github.com/happycodelucky/repixelate"
+  url "https://github.com/happycodelucky/repixelate/archive/refs/tags/v0.3.1.tar.gz"
+  sha256 "ddc6f717f600f5060bf3c602be739dd19249454fd4b4cb0a7c72c67091930dd0"
   # PolyForm Shield License 1.0.0 (see LICENSE.md), which has no SPDX identifier.
   license :cannot_represent
-  head "https://github.com/happycodelucky/repixel.git", branch: "main"
+  head "https://github.com/happycodelucky/repixelate.git", branch: "main"
 
   depends_on "numpy"
   depends_on "pillow"
