@@ -1,15 +1,16 @@
 # Repixel
 
-> Repixel recovers true-resolution pixel art from images and videos where each art pixel was drawn as a block of many screen pixels (upscaled, AI-generated, JPEG-compressed). It finds the pixel grid automatically, including fractional sizes such as 2.867 px, samples one colour per art pixel, cleans up JPEG noise, and writes a lossless PNG (or animated PNG/GIF for video) at 1 art pixel = 1 image pixel. It can also make a flat background colour transparent.
+> Repixel recovers true-resolution pixel art from images and videos where each art pixel was drawn as a block of many screen pixels (upscaled, AI-generated, JPEG-compressed). It finds the pixel grid automatically, including fractional sizes such as 2.867 px, samples one colour per art pixel, cleans up noise, and writes a lossless PNG (or animated PNG, GIF or sprite sheet for video) at 1 art pixel = 1 image pixel. It can also make a flat background colour transparent, split a video into per-sprite animations, find the walk cycle and reduce it to a set number of frames.
 
 Use this tool when the user has pixel art that is blurry, JPEG-damaged, upscaled, or AI-generated, and wants clean sprites, a sprite sheet, or game-ready assets. Do not use it for photos or non-pixel-art images: it will find no grid or a meaningless one.
 
 ## Files
 
-- [repixel.py](repixel.py): the whole tool, a single-file CLI (Python 3.10+, numpy, Pillow; ffmpeg for video)
+- [repixel.py](repixel.py): the whole tool, a single-file CLI and importable module (Python 3.10+, numpy, Pillow; ffmpeg for video)
 - [AGENTS.md](AGENTS.md): notes for agents modifying the code (architecture, verification, gotchas)
 - [README.md](README.md): human-facing overview with before/after examples
 - [requirements.txt](requirements.txt): Python dependencies
+- [tests/test_repixel.py](tests/test_repixel.py): test suite; [tests/bench.py](tests/bench.py): ground-truth accuracy benchmark
 
 ## Setup
 
@@ -17,14 +18,14 @@ Use this tool when the user has pixel art that is blurry, JPEG-damaged, upscaled
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-Video input also needs `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg`).
+Video input also needs `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg` or `apt install ffmpeg`).
 
 ## Commands
 
 Always pass `--no-ask` when running non-interactively. It never prompts anyway when stdin is not a terminal, but the flag makes that explicit.
 
 ```bash
-# Still image -> <input>_repixel.png
+# Still image -> <input>_repixel.png (choose the name with -o / --output)
 .venv/bin/python repixel.py art.jpg --no-ask
 
 # Sprite sheet on a flat background colour -> transparent, cropped to content
@@ -32,6 +33,9 @@ Always pass `--no-ask` when running non-interactively. It never prompts anyway w
 
 # Background colour auto-detected from the image border
 .venv/bin/python repixel.py sheet.jpg -t --trim --no-ask
+
+# Cut only the background connected to the border (keeps that colour inside the art)
+.venv/bin/python repixel.py sheet.jpg -t --key contiguous --no-ask
 
 # Force the pixel size (skips detection); fractions are fine
 .venv/bin/python repixel.py art.jpg --scale 2.87 --no-ask
@@ -42,14 +46,20 @@ Always pass `--no-ask` when running non-interactively. It never prompts anyway w
 # Also save a nearest-neighbour upscale back to source size, to compare by eye
 .venv/bin/python repixel.py art.jpg --preview --no-ask
 
-# Video -> lossless animated PNG; resample to a sprite frame rate
-.venv/bin/python repixel.py clip.mp4 --fps 12 -t --trim --no-ask
+# Video -> lossless animated PNG, one frame per held pose
+.venv/bin/python repixel.py clip.mp4 -t --trim --no-ask
 
-# Video -> GIF plus one PNG per unique frame
-.venv/bin/python repixel.py clip.mp4 --fps 12 -t --trim -o walk.gif --frames walk_frames --no-ask
+# Video -> GIF plus one PNG per output frame
+.venv/bin/python repixel.py clip.mp4 -t --trim -o walk.gif --frames walk_frames --no-ask
+
+# Video -> sprite sheet: one row per sprite, one walk cycle each
+.venv/bin/python repixel.py clip.mp4 -t --split --loop --sheet -o sheet.png --no-ask
+
+# Same, with every cycle reduced to exactly 8 frames
+.venv/bin/python repixel.py clip.mp4 -t --split --loop --poses 8 --sheet -o sheet8.png --no-ask
 ```
 
-Input type is chosen by extension: `.mp4 .mov .m4v .webm .mkv .avi .gif` are treated as video, everything else as a still image.
+Input type is chosen by extension: `.mp4 .mov .m4v .webm .mkv .avi .gif` are treated as video, everything else as a still image. Still images with an alpha channel keep it (thresholded to on/off).
 
 ## Reading the output
 
@@ -57,22 +67,36 @@ Stdout, still image:
 
 ```
 art.jpg: 1376x768  pixel size 2.867 (detected, confidence 0.30)
-  -> art_repixel.png  480x268, 358 colours, mean reconstruction error 3.8/255
+  -> art_repixel.png  480x268, 365 colours, mean reconstruction error 3.8/255
 ```
 
 Stdout, video:
 
 ```
-clip.mp4: 1280x720 24fps -> 12fps, 120 frames  pixel size 10.347-10.631 (detected, confidence 0.77 on frame 1, tracked after)
-  -> clip_repixel.png  112x34, 120 unique frames, 114 colours
+clip.mp4: 1280x720 24fps, 240 frames  pixel size 10.347-10.629 (detected, confidence 0.77 on frame 1, tracked across the clip)
+  -> clip_repixel.png  112x34, 85 unique frames, 168 colours (85 poses held about 3 frames each)
 ```
 
-- `pixel size`: source pixels per art pixel. For video it is a range, because the grid is re-measured on every frame and follows camera zooms.
-- `confidence` (0 to 1): how consistently the edges line up on the grid. Above 0.6 is solid. Around 0.3 is normal for very small pixels (under 4 px). Below 0.25 counts as uncertain.
+Stdout, video with `--split --loop --sheet`:
+
+```
+clip.mp4: 1280x720 24fps, 240 frames  pixel size 10.347-10.629 (detected, confidence 0.77 on frame 1, tracked across the clip)
+  sprite 1: 22x34 at 4,18  moves in frames 4-85, 19 poses held about 3 frames each, loop of 5, 5 frames
+  sprite 2: 22x34 at 27,18  moves in frames 44-102, 24 poses held about 3 frames each, loop of 11, 11 frames
+  -> sheet.png  sheet of 11x5 cells, each 22x34, 130 colours
+```
+
+- `pixel size`: source pixels per art pixel. Printed as `A x B` when the axes differ. For video it is a range, because the grid is re-measured on every frame and follows camera zooms.
+- `confidence` (0 to 1): how consistently the edges line up on the grid. Above 0.6 is solid. Around 0.3 is normal for very small pixels (under 4 px). Below 0.25 counts as uncertain. For video it is measured on the clearest of four probe frames, and that frame's number is printed.
 - `mean reconstruction error`: average difference between the source and the redrawn grid. Under about 5/255 means the grid explains the image well. A much larger value suggests the wrong pixel size.
+- `N poses held about K frames each`: the video repeats each pose for about K frames; the output has one frame per pose.
+- `sprite N: WxH at X,Y`: the sprite's box on the shared canvas (art pixels). `moves in frames A-B` are 1-based source frame numbers. `loop of L` is the cycle length in poses. The last number is the frames written for that sprite.
+- `sheet of CxR cells, each WxH`: sheet layout. Rows with fewer frames are padded with transparent cells. Sprites are centred and bottom-aligned in their cells.
 - Stderr may show `background #rrggbb` (the colour actually keyed) and warnings.
 
-Exit codes: `0` = success, `1` = missing/unreadable input, no grid found, missing ffmpeg, no frames decoded or a bad colour, `2` = bad arguments.
+Without `--sheet`, `--split` writes one animation per sprite, named `<output stem>_1.png`, `_2.png` and so on; each sprite line then ends with `-> <file>`.
+
+Exit codes: `0` = success, `1` = missing/unreadable input, no grid found, missing ffmpeg, no frames decoded, a bad colour, or `--split` without `-t`; `2` = bad arguments.
 
 ## Handling uncertain detection
 
@@ -86,19 +110,43 @@ Sizes below 2 px cannot be detected, because they alias onto real sizes. If the 
 
 ## Choosing settings
 
-- **Background colour** (`-t`): accepts an RGB hex colour in any case (`ff00ff`, `'#FF00FF'`, `0xff00ff`, short `f0f` / `'#f0f'`), a CSS name (`magenta`), `rgb(255,0,255)`, or no value for auto-detection from the border. Quote values that start with `#`, because shells treat `#` as a comment. The given colour is snapped to the image's real background colour (JPEG shifts flat colours; `ff00ff` often becomes something like `fd33f8`). Snapping only happens if at least 1% of the image is within 100 of the given colour; otherwise the colour is used as given. Use `-t` whenever the art sits on a flat chroma-key colour such as magenta or green.
+- **Background colour** (`-t`, `--transparent`): accepts an RGB hex colour in any case (`ff00ff`, `'#FF00FF'`, `0xff00ff`, short `f0f` / `'#f0f'`), a CSS name (`magenta`), `rgb(255,0,255)`, or no value for auto-detection from the border. Quote values that start with `#`, because shells treat `#` as a comment. The given colour is snapped to the image's real background colour (JPEG shifts flat colours; `ff00ff` often becomes something like `fd33f8`). Snapping only happens if at least 1% of the image is within 100 of the given colour; otherwise the colour is used as given. Use `-t` whenever the art sits on a flat chroma-key colour such as magenta or green.
 - **Argument order with bare `-t`**: put the input file first (`repixel.py sheet.jpg -t --trim`). Otherwise `repixel.py -t sheet.jpg` reads the file name as the colour.
+- **`--key`**: `full` (default) cuts the background colour wherever it appears, including enclosed gaps such as the space between branches. `contiguous` cuts only what is connected to the image border. Use `contiguous` when the art itself uses the background colour, or when holes appear inside sprites; the cost is that enclosed gaps stay filled.
 - **`--key-tol`** (default 100): RGB distance from the background colour that gets cut. Raise it (120 to 150) if pinkish edge pixels remain. Lower it (60) if real sprite colours close to the background colour are being cut.
-- **Despill** (on by default with `-t`): removes the background's tint from pixels within 2 px of the edge. For example, a dark outline turned purple by a magenta background goes back to dark. It only recolours and never changes transparency. Turn it off with `--no-despill` if the sprite's real edge colours share the background's hue.
-- **`--merge`** (default 18) merges near-identical colours caused by JPEG noise. `--colors N` instead forces an exact maximum palette size. Use `--merge 0` to keep every sampled colour.
-- **`--no-snap`**: use a perfectly uniform grid. Try this if the output shows doubled or missing rows or columns on art with large pixels.
-- **Video `--fps`**: AI videos animate on every frame at 24 fps. `--fps 8` or `--fps 12` gives sprite-style animation and skips many motion-blurred in-between frames.
+- **Despill** (on by default with `-t`): cleans the background's tint off pixels at the sprite edge. A tinted edge pixel takes the nearest clean colour used within 3 px; if nothing matches and it could be mostly background, it is cut; otherwise it keeps its corrected colour. Colours that the surrounding art really has (a purple trunk next to magenta) are left alone. It never runs on a clean, noise-free image and never adds pixels. Turn it off with `--no-despill` if edge colours are being changed wrongly.
+- **`--merge`**: by default the merge distance is chosen from the image's measured noise: 0 for a clean lossless image (colours kept exactly), otherwise 18 to 30. Pass a number to force it; `--merge 0` keeps every sampled colour. `--colors N` instead forces an exact maximum palette size.
+- **Non-square pixels**: detection allows the two axes to differ by up to 2%. For more, pass `--scale X --scale-y Y`.
+- **`--no-snap`**: use a perfectly uniform grid. Try this if the output shows doubled or missing rows or columns.
+- **Video frame rate**: leave it alone first. AI video is usually animated "on threes" (8 poses a second inside 24 fps); held poses are detected and collapsed to one clean frame each, which is better than `--fps` resampling. Use `--no-hold` to keep every frame, and `--fps` only for genuinely smooth motion.
+- **`--split`** (needs `-t`): each separate sprite becomes its own animation covering only the frames where it moves. Sprites that touch briefly are still told apart.
+- **`--loop`**: keeps exactly one repeating cycle. Prints `no loop found` and keeps everything if there is none. It can pick half a walk cycle when both steps look alike.
+- **`--poses N`**: reduces an animation to N frames by splitting it into N consecutive stretches and keeping the most typical frame of each. Combine with `--loop` for an N-frame cycle.
+- **`--sheet`**: writes a sprite sheet PNG instead of an animation.
+- **`--dedupe F`** (default 0.002): consecutive output frames differing in at most this fraction of pixels are merged into one longer frame. `0` merges exact repeats only, `-1` keeps every frame.
+- **`--no-deblip`**: keep single-frame pixel flickers and single-frame blurred in-between pixels, which are removed by default.
 - **Video `--extent`**: `intersect` (default) keeps only the area visible in every frame. `union` keeps everything and leaves unseen areas transparent.
-- **Video output format**: `.png` (default) writes a lossless animated PNG. `.gif` is lossless only up to 256 colours (255 with transparency) and warns otherwise. `--frames DIR` also writes each unique frame as its own PNG.
+- **Video output format**: `.png` (default) writes a lossless animated PNG. `.gif` is lossless only up to 256 colours (255 with transparency) and warns otherwise. `--frames DIR` also writes each output frame as its own PNG.
+
+## Using it as a library
+
+```python
+import numpy as np
+from PIL import Image
+import repixel
+
+img = np.asarray(Image.open("art.jpg").convert("RGB"))
+res = repixel.repixel_image(img, repixel.Options(transparent="magenta", trim=True))
+# res.pixels: (h, w, 3 or 4) uint8, one element per art pixel; None is returned if no grid is found
+# res.scale_x, res.scale_y, res.error, res.detection.confidence, res.background, res.merge_tol
+```
+
+`repixel.Options` fields mirror the image flags: `scale`, `scale_y`, `snap`, `merge`, `colors`, `transparent`, `key`, `key_tol`, `despill`, `trim`.
 
 ## Output guarantees
 
 - Output is always lossless: PNG (indexed when 256 colours or fewer), animated PNG, or GIF.
+- A clean, lossless upscale is recovered exactly: same pixels, same palette.
 - Transparency is binary: every pixel is fully transparent or fully opaque.
 - Video frames share one palette and one canvas, so a pixel at (x, y) is the same art pixel in every frame.
 
@@ -106,11 +154,12 @@ Sizes below 2 px cannot be detected, because they alias onto real sizes. If the 
 
 1. Check the stdout numbers: plausible size, high enough confidence, low reconstruction error.
 2. View the output upscaled with nearest-neighbour (or use `--preview`) next to a crop of the source. Pixel edges should be crisp and shapes should match.
-3. With `-t`, composite the output on a neutral grey and look for leftover background-coloured pixels along edges.
+3. With `-t`, composite the output on a dark and on a light background and look for leftover background-coloured or off-colour pixels along edges, and for holes inside the art.
 
 ## Known limitations
 
 - One grid per image: a sheet that mixes sprites at different pixel scales will only be right for the dominant scale.
-- Motion-blurred video frames (AI in-between frames) can keep background-tinted smears that are dark enough to count as sprite. `--fps` resampling helps.
 - Pixels smaller than 2 px in the source cannot be auto-detected (use `--scale`).
+- Pixels under about 4 px that are also blurred lose detail: some shades in busy areas will be wrong.
 - Rotated or perspective-distorted grids are not supported.
+- AI video sometimes draws a ghost of the previous pose into a held frame. That is baked into the pose and is not removed.
