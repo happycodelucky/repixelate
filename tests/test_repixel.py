@@ -231,6 +231,88 @@ class Animation(unittest.TestCase):
         self.assertTrue(10 <= a <= 11 and 21 <= b <= 22, (a, b))
         self.assertEqual(rp.active_span(self.rgba[[0] * 8]), (0, 1))
 
+    def corrupted(self, order, flips=3, seed=11):
+        """The given poses with a few random wrong pixels in every frame."""
+        rng = np.random.default_rng(seed)
+        frames = self.rgba[order].copy()
+        opaque = np.argwhere(frames[..., 3] > 0)
+        for t, y, x in opaque[rng.choice(len(opaque), flips * len(frames), replace=False)]:
+            frames[t, y, x, :3] = rng.integers(0, 255, 3)
+        return frames
+
+    def test_voting_across_cycles_removes_random_errors(self):
+        order = [0, 0] + list(range(6)) * 4
+        frames = self.corrupted(order)
+        D = rp.frame_distances(frames)
+        start, length = rp.find_loop(D, 3)
+        self.assertEqual(length, 6)
+        cycle, voted, swapped = rp.vote_cycle(frames, start, length, D, np.zeros(len(frames)))
+        want = self.rgba[[order[start + i] for i in range(6)]]
+        self.assertFalse((frames[start:start + 6] == want).all())     # one pass alone is wrong
+        np.testing.assert_array_equal(cycle, want)
+        self.assertGreater(voted, 0)
+        self.assertEqual(swapped, 0)
+
+    def test_voting_needs_three_passes(self):
+        frames = self.corrupted(list(range(6)) * 2)
+        D = rp.frame_distances(frames)
+        cycle, voted, _ = rp.vote_cycle(frames, 0, 6, D, np.zeros(len(frames)))
+        np.testing.assert_array_equal(cycle, frames[:6])
+        self.assertEqual(voted, 0)
+
+    def test_voting_never_mixes_different_drawings(self):
+        other, masks = synth.make_cycle(np.random.default_rng(77), poses=6)
+        other = np.concatenate([other, np.where(masks, 255, 0).astype(np.uint8)[..., None]], -1)
+        other[~masks] = 0
+        frames = np.concatenate([self.rgba, other, other])        # same rhythm, redrawn sprites
+        D = rp.frame_distances(frames)
+        cycle, voted, swapped = rp.vote_cycle(frames, 0, 6, D, np.zeros(len(frames)))
+        np.testing.assert_array_equal(cycle, self.rgba)
+        self.assertEqual((voted, swapped), (0, 0))
+
+    def ghosted(self, prev, pose, share=3):
+        """`pose` with a faint copy of `prev` left in every `share`-th changed pixel."""
+        out = pose.copy()
+        both = (prev[..., 3] > 0) & (pose[..., 3] > 0)
+        changed = np.argwhere(both & (np.abs(prev[..., :3].astype(int) - pose[..., :3]).sum(-1) > 150))
+        for y, x in changed[::share]:
+            out[y, x, :3] = (prev[y, x, :3].astype(int) * 2 // 5 + pose[y, x, :3].astype(int) * 3 // 5)
+        return out, len(changed[::share])
+
+    # A ghost shows where a pixel changes and then stays: pose 3 is held for two frames
+    # here, and the first of them keeps a faint copy of pose 2.
+    GHOST_ORDER = [0, 1, 2, 3, 3, 4, 5] * 2
+
+    def test_ghost_score(self):
+        clean = self.rgba[self.GHOST_ORDER]
+        self.assertLess(rp.ghost_scores(clean).max(), 0.01)
+        frames = clean.copy()
+        frames[3], n = self.ghosted(clean[2], clean[3], share=1)
+        self.assertGreater(n, 20)
+        score = rp.ghost_scores(frames)
+        self.assertEqual(int(np.argmax(score)), 3)
+        self.assertGreater(score[3], 0.05)
+        self.assertGreater(score[3], 5 * np.delete(score, 3).max())
+
+    def test_ghosted_pose_is_swapped_for_a_clean_pass(self):
+        frames = self.rgba[self.GHOST_ORDER].copy()
+        for t in (4, 11):                       # the second held frame differs a little
+            ys, xs = np.nonzero(frames[t, ..., 3] > 0)
+            frames[t, ys[:60], xs[:60], :3] = (10, 200, 200)
+        want = frames[:7].copy()
+        frames[3], _ = self.ghosted(frames[2], frames[3], share=2)
+        D = rp.frame_distances(frames)
+        cycle, voted, swapped = rp.vote_cycle(frames, 0, 7, D, rp.ghost_scores(frames))
+        self.assertEqual((voted, swapped), (0, 1))
+        np.testing.assert_array_equal(cycle, want)
+
+    def test_pick_poses_avoids_ghosted_frames(self):
+        seq = np.repeat(self.rgba[[0, 3]], 3, axis=0)
+        D = rp.frame_distances(seq)
+        self.assertEqual([r for r, _, _ in rp.pick_poses(D, 2)], [0, 3])
+        ghost = np.array([0.5, 0.0, 0.5, 0.5, 0.5, 0.0])
+        self.assertEqual([r for r, _, _ in rp.pick_poses(D, 2, ghost)], [1, 5])
+
     def test_blended_in_between_pixels_are_removed(self):
         a, b = self.rgba[0], self.rgba[3]
         mix = a.copy()
@@ -300,6 +382,23 @@ class Video(unittest.TestCase):
         cw = sheet.shape[1] // 6
         self.assertEqual(sheet.shape[0] % 3, 0)
         self.assertEqual(sheet.shape[1], cw * 6)
+
+    def test_loop_with_and_without_cross_cycle_voting(self):
+        out = self.tmp / "loop.png"
+        code, stdout, _ = run_cli(self.clip, "-t", "--loop", "-o", out, "--no-ask")
+        self.assertEqual(code, 0)
+        self.assertIn("loop of 6", stdout)
+        voted = self.frames_of(out)
+        code, stdout, _ = run_cli(self.clip, "-t", "--loop", "--no-vote", "-o", out, "--no-ask")
+        self.assertEqual(code, 0)
+        self.assertNotIn("voted", stdout)
+        plain = self.frames_of(out)
+        self.assertEqual(len(voted), 6)
+
+        def accuracy(frames):
+            return np.mean([max(synth.score(f, self.poses[p], self.masks[p], max_shift=0)["acc"]
+                                for p in range(6)) for f in frames])
+        self.assertGreaterEqual(accuracy(voted), accuracy(plain))
 
     def test_poses_reduces_the_frame_count(self):
         out = self.tmp / "four.png"

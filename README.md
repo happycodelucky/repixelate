@@ -147,8 +147,9 @@ Reduce each walk cycle to exactly 8 frames:
 | `--no-snap` | Use a perfectly even grid instead of following drift and snapping lines to edges. |
 | `--preview [N]` | Also save an N× upscale (default: back to the input size). |
 | `--split` | Video: treat each separate sprite as its own animation, covering only the frames where it moves. Needs `-t`. |
-| `--loop` | Video: find the repeating cycle (such as a walk cycle) and keep exactly one. |
-| `--poses N` | Video: reduce the animation to its N most representative frames. |
+| `--loop` | Video: find the repeating cycle (such as a walk cycle) and keep exactly one. The other passes of the cycle are used to clean it up. |
+| `--no-vote` | Video, with `--loop`: take the cycle exactly as one pass shows it, without using the other passes. |
+| `--poses N` | Video: reduce the animation to its N most representative frames, avoiding ghosted ones. |
 | `--sheet` | Video: write a sprite sheet PNG instead of an animation. One column per frame, and with `--split` one row per sprite. |
 | `--fps N` | Video: resample to N frames per second first. |
 | `--frames DIR` | Video: also save each output frame as a PNG. |
@@ -174,7 +175,8 @@ Run `.venv/bin/python repixel.py --help` for the full list.
 - Pixel sizes below 2 px can't be detected; pass `--scale`.
 - Rotated or perspective-warped grids aren't supported.
 - Very small pixels (under about 4 px) that are also blurred lose detail that can't be recovered; expect some wrong shades in busy areas.
-- AI video sometimes draws a ghost of the previous pose into a frame. That is part of the picture, so it stays. `--poses` usually avoids such frames but can't always.
+- AI video sometimes draws a ghost of the previous pose into a frame. That is part of the picture and can't be erased. `--poses` avoids such frames where it can, and `--loop` swaps a ghosted pose for a cleaner pass of the same pose when one exists, but some ghosting usually remains.
+- Cleaning a cycle by voting across its repeats only works when the repeats are the same drawing, as in hand-made animation. AI video redraws the character on every pass, so there it rarely applies.
 - `--loop` can settle on half a walk cycle (one step) when the two steps look alike.
 
 ## How it works
@@ -182,6 +184,21 @@ Run `.venv/bin/python repixel.py --help` for the full list.
 Repixel measures where colour jumps between neighbouring rows and columns and looks for the grid sizes those jumps line up on, using a frequency analysis that allows fractional sizes. It then redraws the image on each candidate grid and throws out the ones that reproduce it badly, such as the spacing between sprites. It lines the grid up with the real edges, takes the median colour from the centre of each cell, and merges colours that differ only by noise, measuring that noise from the image itself.
 
 For video, it does this on every frame and places the frames on one shared canvas. It then looks at how much the picture changes from frame to frame to find poses that are held, and builds one clean frame per pose by majority vote.
+
+## Progress
+
+Each version is scored on the same benchmark of damaged pixel art with a known answer.
+
+| Version | Right pixel size | Pixels with the right colour | Clean input recovered exactly |
+|---|---|---|---|
+| v1 | 86% | 78% | no |
+| v2 | 100% | 91% | yes |
+
+![A blurred small-pixel sprite sheet: v1 finds 47.5 px and returns five flat blocks, v2 finds 2.4 px and recovers the sprites](docs/progress/detection.png)
+
+*One benchmark case: v1 mistook the spacing between sprites for the pixel grid; v2 finds the real 2.4 px grid.*
+
+See [docs/PROGRESS.md](docs/PROGRESS.md) for the full comparison, including background removal and video.
 
 ## Checking it works
 

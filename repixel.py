@@ -1189,14 +1189,106 @@ def find_loop(D: np.ndarray, min_len: int) -> tuple[int, int] | None:
     return int(np.argmin(ratio)), L
 
 
-def pick_poses(D: np.ndarray, n: int) -> list[tuple[int, int, int]]:
+def ghost_scores(frames: np.ndarray, background: np.ndarray | None = None, tol: float = 24.0) -> np.ndarray:
+    """How ghosted each frame of an animation looks, 0..1.
+
+    Video models often leave a faint copy of the previous pose in a frame. Such a pixel
+    is neither what it was nor what it becomes but a mixture of the two, so the score is
+    the share of a frame's pixels whose colour lies between the previous frame's and the
+    next frame's. Real motion scores low, because a pixel normally jumps from one
+    palette colour to another. With `background`, transparent pixels count as that
+    colour, which catches ghosts drawn over the background. A ghost on a pixel that
+    changes again in the very next frame is not counted (there is nothing to compare it
+    with), and the first and last frames have only one neighbour and score 0.
+    """
+    T = frames.shape[0]
+    score = np.zeros(T)
+    rgba = frames.shape[-1] == 4
+
+    def colours(f):
+        c = f[..., :3].astype(float)
+        if rgba and background is not None:
+            c[f[..., 3] == 0] = background
+        return c
+
+    for i in range(1, T - 1):
+        a, x, b = frames[i - 1], frames[i], frames[i + 1]
+        differs = (x != a).any(-1) & (x != b).any(-1)
+        fa, fx, fb = colours(a), colours(x), colours(b)
+        ab = fb - fa
+        len2 = (ab ** 2).sum(-1)
+        t = ((fx - fa) * ab).sum(-1) / np.maximum(len2, 1e-9)
+        dist = np.sqrt(((fx - (fa + t[..., None] * ab)) ** 2).sum(-1))
+        between = differs & (len2 > (2 * tol) ** 2) & (t > 0.15) & (t < 0.85) & (dist <= tol)
+        seen = np.ones(x.shape[:2], bool)
+        if rgba:
+            if background is None:
+                between &= (a[..., 3] > 0) & (x[..., 3] > 0) & (b[..., 3] > 0)
+            seen = (a[..., 3] > 0) | (x[..., 3] > 0) | (b[..., 3] > 0)
+        score[i] = between.sum() / max(1, int(seen.sum()))
+    return score
+
+
+VOTE_SAME = 0.10    # passes of a cycle this alike show the same drawing: vote pixel by pixel
+SWAP_CLOSE = 0.35   # a pass this alike may stand in for a ghosted pose of the cycle
+GHOST_HIGH = 1.5    # "ghosted" = this many times the animation's typical ghost score
+
+
+def vote_cycle(frames: np.ndarray, start: int, length: int, D: np.ndarray,
+               ghost: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """Use the other passes of a looping animation to clean up one cycle.
+
+    The cycle frames[start:start+length] is the reference. Every other frame is matched
+    to the reference pose it looks most like. Then, per pose:
+      * if at least two other passes show the same drawing (they differ only by noise),
+        every pixel takes the value most of them agree on;
+      * otherwise, if the pose is ghosted and another pass shows much the same pose
+        without the ghost, that frame is used instead.
+    Passes are never mixed unless they are the same drawing: generated video redraws the
+    character on every pass, and mixing different drawings gives limbs from both.
+    Returns (cycle, poses voted, poses swapped).
+    """
+    T = frames.shape[0]
+    ref = np.arange(start, start + length)
+    cycle = frames[ref].copy()
+    others = np.array([t for t in range(T) if not start <= t < start + length], int)
+    if others.size == 0:
+        return cycle, 0, 0
+    nearest = D[np.ix_(others, ref)].argmin(1)
+    typical = float(np.median(ghost[1:-1])) if T > 2 else 0.0
+    voted = swapped = 0
+    for phase in range(length):
+        r = start + phase
+        passes = others[nearest == phase]
+        same = passes[D[passes, r] <= VOTE_SAME]
+        if same.size >= 2:
+            ids = _frame_ids(frames[np.concatenate([[r], same])])
+            mode = rest_pose(ids)
+            majority = (ids == mode).sum(0) * 2 > ids.shape[0]
+            mode = np.where(majority, mode, ids[0])
+            new = _unpack_ids(mode, frames.shape[-1]).reshape(frames.shape[1:])
+            voted += int((new != cycle[phase]).any())
+            cycle[phase] = new
+            continue
+        if ghost[r] <= max(GHOST_HIGH * typical, 0.02):
+            continue
+        clean = passes[(D[passes, r] <= SWAP_CLOSE) & (ghost[passes] < 0.5 * ghost[r])
+                       & (passes > 0) & (passes < T - 1)]       # end frames have no score
+        if clean.size:
+            cycle[phase] = frames[min(clean, key=lambda t: (ghost[t], D[t, r]))]
+            swapped += 1
+    return cycle, voted, swapped
+
+
+def pick_poses(D: np.ndarray, n: int, ghost: np.ndarray | None = None) -> list[tuple[int, int, int]]:
     """Reduce an animation to n frames.
 
     The frames are split into n consecutive stretches so that every frame is as close
     as possible to the one chosen to stand for its stretch (dynamic programming, so the
     split is the best possible, not a greedy guess). The stand-in is the stretch's most
     typical frame, which is never a blurred in-between: those resemble nothing else.
-    Returns (frame, start, end) per stretch, end exclusive.
+    With `ghost` scores, the least ghosted of the frames that are nearly as typical is
+    chosen instead. Returns (frame, start, end) per stretch, end exclusive.
     """
     T = D.shape[0]
     n = max(1, min(n, T))
@@ -1219,7 +1311,12 @@ def pick_poses(D: np.ndarray, n: int) -> list[tuple[int, int, int]]:
     out, j = [], T - 1
     for k in range(n - 1, -1, -1):
         i = back[k, j] if k else 0
-        out.append((int(rep[i, j]), int(i), int(j) + 1))
+        r = int(rep[i, j])
+        if ghost is not None:
+            c = D[i:j + 1, i:j + 1].sum(0)
+            ok = np.nonzero(c <= 1.15 * c.min() + 1e-9)[0]
+            r = i + int(min(ok, key=lambda m: (ghost[i + m], c[m])))
+        out.append((r, int(i), int(j) + 1))
         j = i - 1
     return out[::-1]
 
@@ -1367,10 +1464,11 @@ def _ms(runs: list[int], fps: float) -> list[int]:
     return np.diff(np.concatenate([[0], cum])).tolist()
 
 
-def reduce_animation(frames: np.ndarray, args, fps: float) -> tuple[np.ndarray, list[int], str]:
+def reduce_animation(frames: np.ndarray, args, fps: float,
+                     background: np.ndarray | None = None) -> tuple[np.ndarray, list[int], str]:
     """Turn one animation (t, h, w, c) into its output frames: held poses become one
-    frame each, then --loop, --poses and repeat merging are applied.
-    Returns (frames, how many source frames each lasts, note for the report)."""
+    frame each, then --loop (with cross-cycle clean-up), --poses and repeat merging are
+    applied. Returns (frames, how many source frames each lasts, note for the report)."""
     notes = []
     runs = [1] * frames.shape[0]
     starts = None if args.no_hold else find_holds(frames)
@@ -1383,15 +1481,26 @@ def reduce_animation(frames: np.ndarray, args, fps: float) -> tuple[np.ndarray, 
         runs = [sum(runs[i:i + step]) for i in range(0, len(runs), step)]
         frames = frames[::step]
         fps /= step
+    ghost = ghost_scores(frames, background) if (args.loop or args.poses) else None
     if args.loop and frames.shape[0] >= 4:
-        lp = find_loop(frame_distances(frames), max(3, int(round(0.25 * fps))))
+        D = frame_distances(frames)
+        lp = find_loop(D, max(3, int(round(0.25 * fps))))
         if lp:
-            frames, runs = frames[lp[0]:lp[0] + lp[1]], runs[lp[0]:lp[0] + lp[1]]
+            cycle = slice(lp[0], lp[0] + lp[1])
             notes.append(f"loop of {lp[1]}")
+            if args.no_vote:
+                frames = frames[cycle]
+            else:
+                frames, voted, swapped = vote_cycle(frames, lp[0], lp[1], D, ghost)
+                if voted:
+                    notes.append(f"{voted} voted across cycles")
+                if swapped:
+                    notes.append(f"{swapped} ghosted swapped")
+            runs, ghost = runs[cycle], ghost_scores(frames, background)
         else:
             notes.append("no loop found")
     if args.poses and frames.shape[0] > args.poses:
-        segs = pick_poses(frame_distances(frames), args.poses)
+        segs = pick_poses(frame_distances(frames), args.poses, ghost)
         runs = [sum(runs[s:e]) for _, s, e in segs]
         frames = frames[[r for r, _, _ in segs]]
         notes.append(f"reduced to {len(segs)}")
@@ -1583,7 +1692,7 @@ def process_video(args, opts: Options) -> int:
             crop = out[:, ys_, xs_].copy()
             crop[:, ~own] = 0
             a, b = active_span(crop, max(2, int(round(0.25 * fps))))
-            fr, fr_runs, note = reduce_animation(crop[a:b], args, fps)
+            fr, fr_runs, note = reduce_animation(crop[a:b], args, fps, bg)
             rows.append(fr)
             line = (f"  sprite {k}: {fr.shape[2]}x{fr.shape[1]} at {xs_.start},{ys_.start}  "
                     f"moves in frames {a + 1}-{b}"
@@ -1600,7 +1709,7 @@ def process_video(args, opts: Options) -> int:
             print(f"  -> {outp}  sheet of {sheet.shape[1] // cw}x{len(rows)} cells, each {cw}x{ch}, "
                   f"{ncolors(sheet)} colours")
     else:
-        fr, fr_runs, note = reduce_animation(out, args, fps)
+        fr, fr_runs, note = reduce_animation(out, args, fps, bg)
         write_frames(fr, "")
         if args.sheet:
             sheet, cw, ch = sheet_image([fr])
@@ -1759,6 +1868,11 @@ def main(argv=None) -> int:
                          "(blurred in-between frames are never picked)")
     vg.add_argument("--loop", action="store_true",
                     help="find the repeating cycle (e.g. a walk cycle) and keep exactly one")
+    vg.add_argument("--no-vote", action="store_true",
+                    help="with --loop: take the cycle exactly as one pass of it shows it. By "
+                         "default the other passes are used to clean it up: identical passes "
+                         "are voted pixel by pixel, and a ghosted pose is swapped for a cleaner "
+                         "pass of the same pose")
     vg.add_argument("--split", action="store_true",
                     help="treat each separate sprite as its own animation, covering only the "
                          "frames in which it moves (needs --transparent)")
