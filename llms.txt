@@ -19,6 +19,7 @@ Install it as a command (`repixel`):
 ```bash
 pip install git+https://github.com/happycodelucky/repixel
 # or: uv tool install git+https://github.com/happycodelucky/repixel
+# or: brew tap happycodelucky/repixel https://github.com/happycodelucky/repixel && brew install repixel
 ```
 
 Or run it from a checkout:

@@ -51,7 +51,17 @@ Or with [uv](https://docs.astral.sh/uv/), which keeps it in its own environment:
 uv tool install git+https://github.com/happycodelucky/repixel
 ```
 
-Either way you get a `repixel` command (`repixel --version` shows which version):
+Or with Homebrew, which also installs ffmpeg:
+
+```bash
+brew tap happycodelucky/repixel https://github.com/happycodelucky/repixel
+```
+
+```bash
+brew install repixel
+```
+
+Any of these gives you a `repixel` command (`repixel --version` shows which version):
 
 ```bash
 repixel my_art.jpg
