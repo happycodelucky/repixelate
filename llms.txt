@@ -14,9 +14,20 @@ Use this tool when the user has pixel art that is blurry, JPEG-damaged, upscaled
 
 ## Setup
 
+Install it as a command (`repixel`):
+
+```bash
+pip install git+https://github.com/happycodelucky/repixel
+# or: uv tool install git+https://github.com/happycodelucky/repixel
+```
+
+Or run it from a checkout:
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
+
+The commands below use the checkout form. With the installed command, replace `.venv/bin/python repixel.py` with `repixel`.
 
 Video input also needs `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg` or `apt install ffmpeg`).
 
@@ -82,15 +93,15 @@ Stdout, video with `--split --loop --sheet`:
 ```
 clip.mp4: 1280x720 24fps, 240 frames  pixel size 10.347-10.629 (detected, confidence 0.77 on frame 1, tracked across the clip)
   sprite 1: 22x34 at 4,18  moves in frames 4-85, 19 poses held about 3 frames each, loop of 5, 5 frames
-  sprite 2: 22x34 at 27,18  moves in frames 44-102, 24 poses held about 3 frames each, loop of 11, 11 frames
-  -> sheet.png  sheet of 11x5 cells, each 22x34, 130 colours
+  sprite 2: 22x34 at 27,18  moves in frames 44-102, 24 poses held about 3 frames each, 4 ghosted repaired, loop of 11, 1 ghosted dropped, 10 frames
+  -> sheet.png  sheet of 10x5 cells, each 22x34, 120 colours
 ```
 
 - `pixel size`: source pixels per art pixel. Printed as `A x B` when the axes differ. For video it is a range, because the grid is re-measured on every frame and follows camera zooms.
 - `confidence` (0 to 1): how consistently the edges line up on the grid. Above 0.6 is solid. Around 0.3 is normal for very small pixels (under 4 px). Below 0.25 counts as uncertain. For video it is measured on the clearest of four probe frames, and that frame's number is printed.
 - `mean reconstruction error`: average difference between the source and the redrawn grid. Under about 5/255 means the grid explains the image well. A much larger value suggests the wrong pixel size.
 - `N poses held about K frames each`: the video repeats each pose for about K frames; the output has one frame per pose.
-- `sprite N: WxH at X,Y`: the sprite's box on the shared canvas (art pixels). `moves in frames A-B` are 1-based source frame numbers. `loop of L` is the cycle length in poses. `N voted across cycles` and `N ghosted swapped` say how many poses of the cycle were cleaned using its other passes. The last number is the frames written for that sprite.
+- `sprite N: WxH at X,Y`: the sprite's box on the shared canvas (art pixels). `moves in frames A-B` are 1-based source frame numbers. `loop of L` is the cycle length in poses. `N ghosted repaired` and `N ghosted dropped` count ghosted poses that were painted over or left out. `N voted across cycles` and `N ghosted swapped` say how many poses of the cycle were cleaned using its other passes. The last number is the frames written for that sprite.
 - `sheet of CxR cells, each WxH`: sheet layout. Rows with fewer frames are padded with transparent cells. Sprites are centred and bottom-aligned in their cells.
 - Stderr may show `background #rrggbb` (the colour actually keyed) and warnings.
 
@@ -120,8 +131,8 @@ Sizes below 2 px cannot be detected, because they alias onto real sizes. If the 
 - **`--no-snap`**: use a perfectly uniform grid. Try this if the output shows doubled or missing rows or columns.
 - **Video frame rate**: leave it alone first. AI video is usually animated "on threes" (8 poses a second inside 24 fps); held poses are detected and collapsed to one clean frame each, which is better than `--fps` resampling. Use `--no-hold` to keep every frame, and `--fps` only for genuinely smooth motion.
 - **`--split`** (needs `-t`): each separate sprite becomes its own animation covering only the frames where it moves. Sprites that touch briefly are still told apart.
-- **`--loop`**: keeps exactly one repeating cycle. Prints `no loop found` and keeps everything if there is none. It can pick half a walk cycle when both steps look alike. The other passes of the cycle are used to clean the one that is kept: where at least two other passes show the same drawing (they differ only by noise), each pixel takes the majority value (`N voted across cycles`); otherwise a ghosted pose is replaced by a cleaner pass of the same pose if one exists (`N ghosted swapped`). Passes that are different drawings are never mixed, so on AI video, which redraws the character each pass, this usually changes little. `--no-vote` turns it off.
-- **Ghosting**: video models often leave a faint copy of the previous pose in a frame. It cannot be erased; `--poses` and `--loop` only steer around it.
+- **`--loop`**: keeps exactly one repeating cycle. Prints `no loop found` and keeps everything if there is none. For a walk it takes the full two-step cycle when the clip shows two passes that join up as well as a single step does; otherwise it gives one step. The other passes of the cycle are used to clean the one that is kept: where at least two other passes show the same drawing (they differ only by noise), each pixel takes the majority value (`N voted across cycles`); otherwise a ghosted pose is replaced by a cleaner pass of the same pose if one exists (`N ghosted swapped`). Passes that are different drawings are never mixed, so on AI video, which redraws the character each pass, this usually changes little. `--no-vote` turns it off.
+- **Ghosting**: video models often leave a faint copy of the previous pose in a frame. Such pixels are mixtures, so they have colours the sprite uses in that pose and nowhere else. In a pose that has many of them they are painted over from their neighbours (`N ghosted repaired`), and a badly ghosted pose is left out, with the pose before it shown for longer (`N ghosted dropped`). `--no-repair` turns both off; use it if a short effect with its own colours (a flash lasting a pose or two) is being painted over. Ghosts in the sprite's normal colours are not detected.
 - **`--poses N`**: reduces an animation to N frames by splitting it into N consecutive stretches and keeping the most typical frame of each, preferring the least ghosted among near-equals. Combine with `--loop` for an N-frame cycle.
 - **`--sheet`**: writes a sprite sheet PNG instead of an animation.
 - **`--dedupe F`** (default 0.002): consecutive output frames differing in at most this fraction of pixels are merged into one longer frame. `0` merges exact repeats only, `-1` keeps every frame.

@@ -23,8 +23,8 @@ import bench  # noqa: E402
 import synth  # noqa: E402
 
 # (label, git commit). The working tree is always the last, newest version.
-VERSIONS = [("v1", "d6fec30")]
-CURRENT = "v2"
+VERSIONS = [("v1", "d6fec30"), ("v2", "e3e68ed")]
+CURRENT = "v3"
 
 OUT = ROOT / "docs" / "progress"
 TREES = ROOT / "test" / "Gemini_Generated_Image.jpeg"
@@ -45,10 +45,12 @@ def scripts(tmp: Path) -> dict[str, Path]:
     return out
 
 
-def run(script: Path, *argv) -> str:
+def run(script: Path, *argv, check: bool = True) -> str | None:
     r = subprocess.run([sys.executable, str(script), *map(str, argv)], capture_output=True, text=True)
     if r.returncode != 0:
-        raise SystemExit(f"{script.name} failed: {r.stderr}")
+        if check:
+            raise SystemExit(f"{script.name} failed: {r.stderr}")
+        return None                      # this version doesn't have these options
     return r.stdout
 
 
@@ -102,7 +104,8 @@ def detection(ver: dict[str, Path], tmp: Path):
         got = np.asarray(Image.open(out).convert("RGBA"))
         acc = synth.score(got, art, mask)["acc"]
         panels.append((f"{label}: found {found} px, {acc:.0%} of sprite pixels right", on(got, GREY, size)))
-    labelled(panels, 2).save(OUT / "detection.png", optimize=True)
+    # input, truth, the first version and the current one (a 2 x 2 grid)
+    labelled(panels[:3] + panels[-1:], 2).save(OUT / "detection.png", optimize=True)
 
 
 def video(ver: dict[str, Path], tmp: Path):
@@ -126,6 +129,22 @@ def video(ver: dict[str, Path], tmp: Path):
     labelled(panels, 1).save(OUT / "video.png", optimize=True)
 
 
+def loops(ver: dict[str, Path], tmp: Path):
+    """The real clip as a sprite sheet of walk cycles (versions that can make one)."""
+    k, panels = 4, []
+    for label, script in ver.items():
+        out = tmp / f"sheet_{label}.png"
+        report = run(script, VIDEO, "-t", "--split", "--loop", "--sheet", "-o", out, "--no-ask", check=False)
+        if report is None:
+            continue
+        counts = [re.search(r", (\d+) frames", line).group(1)
+                  for line in report.splitlines() if line.startswith("  sprite")]
+        sheet = np.asarray(Image.open(out).convert("RGBA"))
+        panels.append((f"{label}: walk cycles of {', '.join(counts)} frames",
+                       on(sheet, GREY, (sheet.shape[1] * k, sheet.shape[0] * k))))
+    labelled(panels, 1).save(OUT / "loops.png", optimize=True)
+
+
 if __name__ == "__main__":
     OUT.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory() as t:
@@ -133,4 +152,5 @@ if __name__ == "__main__":
         edges(versions, Path(t))
         detection(versions, Path(t))
         video(versions, Path(t))
+        loops(versions, Path(t))
     print("wrote", ", ".join(sorted(p.name for p in OUT.glob("*.png"))))

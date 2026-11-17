@@ -19,11 +19,12 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 | Path | What |
 |---|---|
-| `repixel.py` | The whole tool: one file, CLI entry point `main()`, library entry point `repixel_image()` |
+| `repixel.py` | The whole tool: one file, CLI entry point `main()`, library entry point `repixel_image()`, version in `__version__` |
+| `pyproject.toml` | Packaging for `pip install` / `uv tool install`; installs the single module and a `repixel` command. The version is read from `repixel.py` |
 | `tests/synth.py` | Ground truth: procedural pixel art and animations, the damage model (`degrade`), scoring (`score`), a synthetic video writer |
 | `tests/bench.py` | Accuracy benchmark over art × pixel size × damage; prints a table |
 | `tests/data/` | Fixed real-art ground truth for the benchmark (never regenerate it: the scores are only comparable while it stays the same) |
-| `tests/test_repixel.py` | `unittest` suite (37 tests, about 25 s) built on the two files above |
+| `tests/test_repixel.py` | `unittest` suite (41 tests, about 25 s) built on the two files above |
 | `llms.txt` | Usage docs for LLMs/agents |
 | `README.md` | Usage docs for humans, with example images |
 | `docs/` | README example images, and `make_examples.py` which regenerates them from `test/` |
@@ -53,8 +54,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    - `absorb_temporal_blends`: single-frame flickers and single-frame in-between blends.
    - `find_holds` / `collapse_holds`: Otsu split of frame-to-frame change into "same pose" and "new pose"; each held pose becomes its per-pixel majority frame.
    - `split_sprites`: sprites separated where they usually are, then grown into what they ever cover. `active_span`: the stretch where a sprite differs from its rest pose (`rest_pose` = per-pixel mode).
-   - `find_loop`: deepest dip of mean frame distance against lag. `pick_poses`: optimal split into N consecutive stretches (dynamic programming), each represented by its medoid, or the least ghosted near-medoid.
-   - `ghost_scores`: share of a frame's pixels whose colour lies between the previous and next frame's. `vote_cycle`: cleans the kept cycle using its other passes: a per-pixel majority where at least two other passes are the same drawing (`VOTE_SAME`), else a ghosted pose is swapped for a cleaner close pass (`SWAP_CLOSE`).
+   - `find_loop`: dips of mean frame distance against lag, measured in real time (each pose weighted by how long it is held) over moving moments only. Takes the shortest dip that is nearly as deep as the deepest, then the dip at twice that if the halves differ and it joins as well. The start is where the cycle joins and matches its neighbouring cycles best. `pick_poses`: optimal split into N consecutive stretches (dynamic programming), each represented by its medoid, or the least ghosted near-medoid.
+   - `transient_pixels` / `ghost_scores`: pixels whose colour appears in under `GHOST_SPREAD` of the animation's poses, and their share per pose. `repair_ghosts` paints them over from stable neighbours in poses that stand out; `drop_ghosts` leaves out poses over `GHOST_DROP` times the limit. `vote_cycle`: cleans the kept cycle using its other passes: a per-pixel majority where at least two other passes are the same drawing (`VOTE_SAME`), else a ghosted pose is swapped for a cleaner close pass (`SWAP_CLOSE`).
 6. **Flows**
    - `repixel_image`: the still-image path as a library call. `process_image`: its CLI wrapper.
    - `process_video`: two ffmpeg passes on a thread pool (`_ordered_map`). Pass 1 collects edge profiles and four probe frames; the grid is detected on the clearest probe and tracked outwards. Pass 2 samples every frame; frames are then placed on one canvas by unwrapping each frame's grid phase, share one palette, and go through `reduce_animation` (holds, `--loop`, `--poses`, repeat merging), per sprite with `--split`.
@@ -89,7 +90,8 @@ Rewriting in a compiled language or moving to the GPU was considered and rejecte
 - **Video grids drift.** The test video zooms from 10.35 to 10.63 px per pixel, so one grid can't serve every frame. Each frame's grid phase is only known modulo one cell; the frame-centre art coordinate is unwrapped against the previous frame.
 - **AI video is animated "on threes", but not strictly.** Holds in the test video vary between 2 and 4 frames and the rhythm shifts, so a fixed cadence fails; `find_holds` thresholds the actual frame-to-frame change. With several sprites moving out of step the whole-canvas signal is muddier than each sprite's own, which is why `--split` runs it per sprite.
 - **Repeated cycles in AI video are not the same drawing.** In the test clip the same pose in different passes shares only 30–80% of its pixels, with two or three passes each. A plain per-pixel vote across passes mixes limbs from different drawings, so `vote_cycle` only votes among passes that differ by noise and otherwise swaps whole frames. On that clip it swaps one pose and votes none; on exact repeats (the synthetic clip) it votes.
-- **Ghosts can't be found from one frame.** A rare-colour score did not separate ghosted poses. "Colour lies between the previous and the next frame's" does, roughly (0.10–0.25 on ghosted poses against 0.01–0.06), but misses pixels that change again in the next frame. Using it to recolour pixels changed 5–10% of every pose, mostly real motion, so it is only used as a score.
+- **Ghosts show in the palette, not in the motion.** "Colour lies between the previous and the next frame's" looked plausible but, checked against the poses that are visibly ghosted, found none of them (it flags real motion instead). What works: colours that appear in under a quarter of the sprite's poses. A ghost is a mixture, and mixtures are one-off colours. Check any new detector against poses you have looked at, not against its own scores.
+- **Loop rules each fail alone.** The deepest dip is fooled by a still start matching a still end, and prefers three steps to two. The shortest clear dip is fooled by partial repeats (a bob every other pose). Measuring in poses instead of time breaks when holds vary (2 to 6 frames in the test clip). And a full walk cycle must join about as well as one step, or a soldier with one clean pass gets a loop with a bad seam.
 - **A standing sprite "loops" perfectly.** `find_loop` picks its start by closure relative to how much happens inside the cycle, or it lands on a motionless stretch.
 - **`np.nanpercentile` is extremely slow** on stacked windows (a Python-level loop per column). Sort and index instead.
 - **zsh doesn't word-split** `$VAR` holding a command. Use a shell function for repeated commands.
@@ -137,7 +139,8 @@ Then run the real files and compare against the expected numbers:
 # expect: pixel size 10.347-10.629 -> 112x34, 85 unique frames (85 poses held about 3 frames each)
 
 .venv/bin/python repixel.py test/gemini_generated_video_78be5980.mp4 -t --split --loop --sheet -o out/sheet.png --no-ask
-# expect: 5 sprites, loops of 5, 11, 5, 5 and 8 poses (sprite 4: 1 ghosted swapped), sheet of 11x5 cells, each 22x34
+# expect: 5 sprites, loops of 5, 11, 9, 8 and 8 poses; 4, 1 and 2 ghosted repaired on sprites 2, 3 and 5,
+#         1 dropped on each of sprites 2 and 3; 5, 10, 8, 8 and 8 frames; sheet of 10x5 cells, each 22x34
 ```
 
 Then look at the results. The numbers alone don't catch visual regressions.
@@ -145,6 +148,8 @@ Then look at the results. The numbers alone don't catch visual regressions.
 - Upscale the outputs ×4–8 with nearest-neighbour and compare against a same-scale crop of the source.
 - Composite transparent ones on a dark background `(24,24,28)` as well as grey `(120,120,120)`: light specks and leftover tint at edges only show on dark.
 - For GIF/APNG changes, decode every frame and diff against `--frames` PNGs: zero mismatched pixels is required (the test suite does this on a synthetic clip).
+
+The installable package is checked by hand: `pip install .` into a fresh venv, then `repixel --version`. Bump `__version__` in `repixel.py` with each recorded version.
 
 When a change moves the benchmark or the real-file results, record it as a new version: commit it, add the previous version's commit to `VERSIONS` in `docs/make_progress.py` and bump `CURRENT`, run the script, and add a row and a section to `docs/PROGRESS.md` (and the short table in `README.md`).
 

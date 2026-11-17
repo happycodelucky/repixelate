@@ -199,6 +199,70 @@ class Animation(unittest.TestCase):
         self.assertGreaterEqual(start, 2)
         np.testing.assert_array_equal(seq[start], seq[start + length])
 
+    def two_step_walk(self):
+        """An 8-pose walk: the second step repeats the first with part of each sprite
+        drawn differently (as the far leg differs from the near one)."""
+        poses, masks = synth.make_cycle(np.random.default_rng(5), poses=4)
+        step1 = np.concatenate([poses, np.where(masks, 255, 0).astype(np.uint8)[..., None]], -1)
+        step1[~masks] = 0
+        step2 = step1.copy()
+        for t in range(4):
+            ys, xs = np.nonzero(step2[t, ..., 3] > 0)
+            pick = slice(len(ys) // 2, len(ys) // 2 + 150)
+            step2[t, ys[pick], xs[pick], :3] = (30, 60, 200)
+        return np.concatenate([step1, step2])
+
+    def test_two_step_walk_gives_the_full_cycle(self):
+        walk = self.two_step_walk()
+        seq = walk[list(range(8)) * 3]
+        D = rp.frame_distances(seq)
+        self.assertGreater(D[0, 4], rp.VOTE_SAME)          # the two steps do differ
+        self.assertLess(D[0, 4], 0.5 * D[0, 1])            # but are much alike
+        start, length = rp.find_loop(D, 3)
+        self.assertEqual(length, 8)
+
+    def test_loop_is_measured_in_real_time(self):
+        # a still lead-in and ending, and poses held for different lengths
+        order = [0] + list(range(1, 6)) + list(range(6)) * 2 + [0]
+        runs = [15] + [3, 2, 4, 3, 3] + [3] * 12 + [12]
+        D = rp.frame_distances(self.rgba[order])
+        start, length = rp.find_loop(D, 6, runs)
+        self.assertEqual(length, 6)
+        self.assertTrue(1 <= start and start + length <= len(order) - 1)
+        self.assertEqual(order[start], order[start + length])
+
+    def test_ghosted_pose_is_repaired(self):
+        frames = self.rgba[self.GHOST_ORDER * 2].copy()
+        clean = frames.copy()
+        frames[3], n = self.ghosted(clean[2], clean[3], share=1)
+        fixed, score, repaired = rp.repair_ghosts(frames)
+        self.assertEqual(repaired, 1)
+        self.assertEqual(int(np.argmax(score)), 3)
+        # Every ghost pixel now has a colour the sprite really uses, taken from next to
+        # it. That is a plausible colour, not always the one that was drawn.
+        wrong_before = (frames[3] != clean[3]).any(-1).sum()
+        wrong_after = (fixed[3] != clean[3]).any(-1).sum()
+        self.assertEqual(wrong_before, n)
+        self.assertLess(wrong_after, wrong_before)
+        self.assertLess(rp.ghost_scores(fixed)[3], 0.25 * score[3])
+        palette = {tuple(c) for c in clean.reshape(-1, 4)}
+        self.assertTrue(all(tuple(c) in palette for c in fixed[3].reshape(-1, 4)))
+        others = [t for t in range(len(frames)) if t != 3]
+        np.testing.assert_array_equal(fixed[others], frames[others])
+        # an animation without ghosts is returned untouched
+        np.testing.assert_array_equal(rp.repair_ghosts(clean)[0], clean)
+
+    def test_badly_ghosted_poses_are_dropped(self):
+        frames = self.rgba.copy()
+        ghost = np.array([0.0, 0.3, 0.0, 0.2, 0.25, 0.0])
+        out, runs, g, dropped = rp.drop_ghosts(frames, [3] * 6, ghost, 0.1)
+        self.assertEqual(dropped, 2)                        # 3 and 4 are neighbours: only one goes
+        np.testing.assert_array_equal(out, frames[[0, 2, 3, 5]])
+        self.assertEqual(runs, [6, 3, 6, 3])
+        self.assertEqual(sum(runs), 18)
+        few = rp.drop_ghosts(frames[:3], [3] * 3, np.array([0.5, 0.5, 0.5]), 0.1)
+        self.assertEqual(few[3], 0)                         # never fewer than three frames
+
     def test_no_loop_in_a_one_way_animation(self):
         rng = np.random.default_rng(3)
         seq = rng.integers(0, 255, (12, 8, 8, 3)).astype(np.uint8)

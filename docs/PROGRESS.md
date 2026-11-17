@@ -10,6 +10,14 @@ Every version is measured the same way. `tests/bench.py` takes pixel art with a 
 |---|---|---|---|---|---|
 | v1 | `d6fec30` | 86% | 78% | no (92%) | 15.7 s, 239 frames out |
 | v2 | `e3e68ed` | 100% | 91% | yes (100%) | 6.5 s, 85 poses out |
+| v3 | this version | 100% | 91% | yes (100%) | 6.5 s, 85 poses out |
+
+Walk cycles found in the test video (five soldiers, `--split --loop`):
+
+| Version | Soldiers given a full two-step cycle | Ghosted poses in the cycles |
+|---|---|---|
+| v2 | 2 of 5 (the others got a single step) | left as they were |
+| v3 | 4 of 5 | 7 repaired, 2 of those left out as too far gone |
 
 Pixels with the right colour, by kind of damage:
 
@@ -21,6 +29,21 @@ Pixels with the right colour, by kind of damage:
 | Off-centre grid + blur + noise + JPEG 70 | 59% | 85% |
 | Uneven (drifting) grid + blur + JPEG 80 | 70% | 88% |
 | Soft edges + JPEG 85 | 84% | 91% |
+
+## v3
+
+Still images are unchanged. This version is about getting clean, complete loops out of video.
+
+![Sprite sheets of walk cycles from v2 and v3](progress/loops.png)
+
+*`--split --loop --sheet` on the test clip. v2 gives three of the soldiers a single step; v3 gives four of them the full two-step cycle and cleans or leaves out the ghosted poses.*
+
+- **Full cycles.** A walk repeats after two steps, but one step looks much like the other, so v2 often stopped at one. v3 measures the rhythm in real time (poses are held for 2 to 6 frames in this clip, which distorted it), compares only the moments when something moves, and takes the two-step cycle when it joins up as well as the single step does. One soldier still gets a single step: the clip does not contain two clean passes of his walk.
+- **Ghosted poses.** Video models leave a faint copy of the previous pose in some frames. v3 finds these by their colours: a sprite keeps its palette as it moves, and a ghost is a mixture, which is a colour of its own that appears in that pose and nowhere else. In a pose with many such pixels they are painted over from their neighbours, and a badly ghosted pose is left out of the animation. The between-colours test used in v2 found none of the poses that are visibly ghosted.
+- **Voting across cycles.** Where at least two other passes of a cycle show the same drawing, each pixel takes the majority value. This helps hand-made style animation with exact repeats. On the AI test clip it never applies, because the model redraws the soldier on every pass (the same pose shares only 30–80% of its pixels between passes).
+- **Installing.** `pip install` and `uv tool install` now work, and give a `repixel` command.
+
+Ghosts made of the sprite's normal colours (a doubled helmet outline, say) are not detected and remain.
 
 ## v2
 
@@ -60,11 +83,6 @@ v2 also adds `--split`, `--loop`, `--poses N` and `--sheet`, which separate the 
 - Images with an alpha channel keep it.
 - The video path is about 2.4× faster.
 - A test suite (30 tests) and the benchmark itself.
-
-## Since v2
-
-- `--loop` now uses the other passes of the cycle to clean the one it keeps. Where the passes are the same drawing, each pixel takes the majority value; otherwise a ghosted pose is swapped for a cleaner pass of the same pose. On hand-made style animation with exact repeats this removes random errors. On the AI test clip it does little, because the model redraws the soldier on every pass (the same pose shares only 30–80% of its pixels between passes): one pose is swapped and none are voted.
-- `--poses` now prefers the least ghosted frame among the near-equally typical ones.
 
 ## v1
 

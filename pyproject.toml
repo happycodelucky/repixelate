@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repixel"
+dynamic = ["version"]
+description = "Recover true-resolution pixel art from upscaled, JPEG-damaged or AI-generated images and video"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0", "pillow>=10.0"]
+keywords = ["pixel-art", "sprites", "sprite-sheet", "upscaling", "image-processing"]
+
+[project.scripts]
+repixel = "repixel:main"
+
+[project.urls]
+Homepage = "https://github.com/happycodelucky/repixel"
+
+[tool.setuptools]
+py-modules = ["repixel"]
+
+[tool.setuptools.dynamic]
+version = { attr = "repixel.__version__" }

@@ -49,6 +49,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+__version__ = "0.3.0"
+
 # --------------------------------------------------------------------------- #
 # Options and results
 # --------------------------------------------------------------------------- #
@@ -1156,82 +1158,211 @@ def merge_repeats(frames: np.ndarray, threshold: float, runs: list[int] | None =
 LOOP_DIP = 0.85     # a cycle must make frames this much more alike than a typical lag does
 
 
-def find_loop(D: np.ndarray, min_len: int) -> tuple[int, int] | None:
+def find_loop(D: np.ndarray, min_len: int, runs: list[int] | None = None) -> tuple[int, int] | None:
     """Find a repeating cycle in an animation from its frame-distance matrix.
 
-    For every lag, measure how much frames differ from the frames that lag later.
-    Nearby frames are always alike, so the curve starts low and climbs; after that, a
-    cycle shows as a dip at its length. The deepest dip wins: a walk also dips at half
-    its cycle (one step looks like the other), but less deeply. Generated video never
-    repeats exactly, so the dip only has to be clear, not zero. Returns (start, length)
-    of one cycle. It starts where the cycle closes best (its end leads back into its
-    start) compared with how much happens inside it, so a stretch where the sprite
-    just stands still, which "closes" perfectly, is not mistaken for the cycle.
+    `runs` says how long each frame is shown; the search is done in that real time, so
+    poses held for different lengths don't distort the rhythm. For every lag, measure
+    how much the picture differs from the picture that lag later. Nearby moments are
+    always alike, so the curve starts low and climbs; after that, a cycle shows as a
+    dip at its length. Generated video never repeats exactly, so a dip only has to be
+    clear, not zero.
+
+    The shortest dip that is nearly as deep as the deepest is taken as the cycle (longer
+    ones are multiples of it). A walk, though, dips at one step as
+    well as at the full two-step cycle, because one step looks much like the other. So
+    if there is also a dip at about twice that length, the two halves really are
+    different pictures, and the longer cycle joins up about as well as the shorter one,
+    the longer one is the cycle.
+
+    Returns (first frame, number of frames) of one cycle. Of all the places it could
+    start, the one chosen is where its end leads back into its start and the cycle best
+    matches the cycles just before and after it, compared with how much happens inside
+    it. So a stretch where nothing
+    moves, which repeats perfectly, is not mistaken for the cycle, and neither is one
+    that runs off the end of the action. `min_len` is the shortest cycle considered,
+    in time steps.
     """
-    T = D.shape[0]
-    lags = np.arange(1, int(T * 2 / 3) + 1)
+    P = D.shape[0]
+    runs = np.asarray(runs if runs is not None else np.ones(P, int))
+    shown = np.repeat(np.arange(P), runs)              # which frame is on screen at each step
+    F = shown.size
+    begins = np.concatenate([[0], np.cumsum(runs)[:-1]])
+    Dt = D[np.ix_(shown, shown)]
+    lags = np.arange(1, F - max(3, int(np.ceil(0.08 * F))) + 1)
     if lags.size < 3:
         return None
-    m = np.array([np.diagonal(D, int(L)).mean() for L in lags])
+    hold = max(1, int(np.median(runs)))
+    # Only moments when something is moving are compared: a still start and a still end
+    # match each other and everything in between badly, which would bury the real cycle.
+    t = np.arange(F)
+    moving = (Dt[t, np.minimum(t + hold, F - 1)] > 0) | (Dt[t, np.maximum(t - hold, 0)] > 0)
+    m = np.full(lags.size, np.inf)
+    for i, L in enumerate(lags):
+        both = moving[:F - L] & moving[L:]
+        if both.sum() >= 3:
+            m[i] = np.diagonal(Dt, int(L))[both].mean()
+    if not np.isfinite(m).any():
+        return None
+    m[~np.isfinite(m)] = m[np.isfinite(m)].max()
+    if hold > 1:                                        # held frames make the curve stepped
+        k = hold | 1
+        m = np.convolve(np.pad(m, k // 2, mode="edge"), np.ones(k) / k, mode="valid")
     dips = [i for i in range(1, len(m) - 1)
-            if m[i] <= m[i - 1] and m[i] <= m[i + 1] and lags[i] >= min_len
+            if lags[i] >= min_len and m[i] == m[max(0, i - hold):i + hold + 1].min()
             and m[:i].max() > m[i]]
-    if not dips:
+    clear = [i for i in dips if m[i] <= LOOP_DIP * float(np.median(m))]
+    if not clear:
         return None
-    i = min(dips, key=lambda i: m[i])
-    if m[i] > LOOP_DIP * float(np.median(m)):
-        return None
-    L = int(lags[i])
-    closure = np.diagonal(D, L)
-    inside = np.array([D[t, t + 1:t + L].mean() for t in range(closure.size)])
-    lively = inside >= 0.5 * inside.max()
-    ratio = np.where(lively, closure / np.maximum(inside, 1e-6), np.inf)
-    return int(np.argmin(ratio)), L
+    # The shortest dip that is nearly as deep as the deepest. Depth is judged within half
+    # the clip: beyond that few moments are compared, and a still start that matches a
+    # still end looks like a perfect repeat.
+    near = [i for i in clear if lags[i] <= F / 2] or clear
+    deepest = min(m[i] for i in near)
+    base = next(i for i in near if m[i] <= 1.3 * deepest + 0.02)
+
+    def best_start(L: int) -> tuple[int, int, float] | None:
+        """(first frame, frame count, how badly it joins) of the best cycle of L time steps."""
+        starts = begins[begins + L < F]
+        if starts.size == 0:
+            return None
+        steps = np.arange(L)
+        repeat = np.empty(starts.size)                  # how well the cycle matches the one after
+        for k, t in enumerate(starts):                  # and the one before it
+            nxt = t + steps[t + steps + L < F]
+            prv = t + steps[t + steps - L >= 0]
+            repeat[k] = np.concatenate([Dt[nxt, nxt + L], Dt[prv, prv - L]]).mean()
+        seam = (repeat + Dt[starts, starts + L]) / 2    # the join itself counts as much again
+        inside = np.array([Dt[t, t + 1:t + L].mean() if L > 1 else 0.0 for t in starts])
+        lively = inside >= 0.5 * inside.max()
+        score = np.where(lively, seam / np.maximum(inside, 1e-6), np.inf)
+        k = int(np.argmin(score))
+        t = int(starts[k])
+        first, last = int(shown[t]), int(shown[t + L])
+        if t + L - begins[last] > runs[last] / 2:       # the cycle ends past the middle of a hold
+            last += 1
+        return first, max(1, last - first), float(score[k])
+
+    L = int(lags[base])
+    found = best_start(L)
+    twice = [j for j in dips if 1.7 * L <= lags[j] <= 2.3 * L and m[j] <= 1.25 * m[base]]
+    if twice:
+        L2 = int(lags[min(twice, key=lambda j: m[j])])
+        longer = best_start(L2)
+        if longer and found and longer[2] <= 1.15 * found[2]:        # and it joins about as well
+            t = int(begins[longer[0]])
+            half = np.arange(t, min(t + L, F - L))
+            if half.size and Dt[half, half + L].mean() > VOTE_SAME:   # two different steps
+                found = longer
+    return found[:2] if found else None
 
 
-def ghost_scores(frames: np.ndarray, background: np.ndarray | None = None, tol: float = 24.0) -> np.ndarray:
-    """How ghosted each frame of an animation looks, 0..1.
+GHOST_SPREAD = 0.25   # a colour seen in under this share of an animation's frames is transient
+GHOST_EXTRA = 0.02    # ghosted = this much more transient colour than a typical frame has
+GHOST_DROP = 2.0      # this many times further out, a frame is too ghosted to keep
 
-    Video models often leave a faint copy of the previous pose in a frame. Such a pixel
-    is neither what it was nor what it becomes but a mixture of the two, so the score is
-    the share of a frame's pixels whose colour lies between the previous frame's and the
-    next frame's. Real motion scores low, because a pixel normally jumps from one
-    palette colour to another. With `background`, transparent pixels count as that
-    colour, which catches ghosts drawn over the background. A ghost on a pixel that
-    changes again in the very next frame is not counted (there is nothing to compare it
-    with), and the first and last frames have only one neighbour and score 0.
+
+def transient_pixels(frames: np.ndarray) -> np.ndarray:
+    """(t, h, w) mask of pixels whose colour the animation hardly ever uses.
+
+    A sprite keeps its palette as it moves, so nearly every colour turns up in most
+    frames. A faint copy of another pose left in a frame (a ghost) is a mixture, and
+    mixtures are colours of their own that appear in that frame and nowhere else.
     """
     T = frames.shape[0]
-    score = np.zeros(T)
-    rgba = frames.shape[-1] == 4
+    ids = _frame_ids(frames)
+    opaque = (frames[..., 3] > 0).reshape(T, -1) if frames.shape[-1] == 4 else np.ones(ids.shape, bool)
+    uniq, inv = np.unique(ids, return_inverse=True)
+    inv = inv.reshape(ids.shape)
+    seen = np.zeros((uniq.size, T), bool)
+    for t in range(T):
+        seen[inv[t][opaque[t]], t] = True
+    rare = seen.mean(1) < GHOST_SPREAD
+    return (rare[inv] & opaque).reshape(frames.shape[:3])
 
-    def colours(f):
-        c = f[..., :3].astype(float)
-        if rgba and background is not None:
-            c[f[..., 3] == 0] = background
-        return c
 
-    for i in range(1, T - 1):
-        a, x, b = frames[i - 1], frames[i], frames[i + 1]
-        differs = (x != a).any(-1) & (x != b).any(-1)
-        fa, fx, fb = colours(a), colours(x), colours(b)
-        ab = fb - fa
-        len2 = (ab ** 2).sum(-1)
-        t = ((fx - fa) * ab).sum(-1) / np.maximum(len2, 1e-9)
-        dist = np.sqrt(((fx - (fa + t[..., None] * ab)) ** 2).sum(-1))
-        between = differs & (len2 > (2 * tol) ** 2) & (t > 0.15) & (t < 0.85) & (dist <= tol)
-        seen = np.ones(x.shape[:2], bool)
-        if rgba:
-            if background is None:
-                between &= (a[..., 3] > 0) & (x[..., 3] > 0) & (b[..., 3] > 0)
-            seen = (a[..., 3] > 0) | (x[..., 3] > 0) | (b[..., 3] > 0)
-        score[i] = between.sum() / max(1, int(seen.sum()))
-    return score
+def ghost_scores(frames: np.ndarray) -> np.ndarray:
+    """How ghosted each frame of an animation looks: the share of its (opaque) pixels
+    that have a transient colour. A clean frame scores near 0."""
+    T = frames.shape[0]
+    count = (frames[..., 3] > 0).reshape(T, -1).sum(1) if frames.shape[-1] == 4 else np.prod(frames.shape[1:3])
+    return transient_pixels(frames).reshape(T, -1).sum(1) / np.maximum(count, 1)
+
+
+def _ghost_limit(score: np.ndarray) -> float:
+    """The ghost score above which a frame stands out against the animation's typical one."""
+    typical = float(np.median(score))
+    return max(2 * typical, typical + GHOST_EXTRA)
+
+
+def _ghosted(score: np.ndarray) -> np.ndarray:
+    return score > _ghost_limit(score)
+
+
+def drop_ghosts(frames: np.ndarray, runs: list[int], ghost: np.ndarray,
+                limit: float) -> tuple[np.ndarray, list[int], np.ndarray, int]:
+    """Leave out the frames whose ghost score is over `limit`, showing the frame before
+    for longer.
+
+    Repair removes a ghost's odd colours, but a frame that was badly ghosted is still a
+    muddle of two poses. Dropping it costs one step of motion and keeps the animation
+    clean. Two neighbouring frames are never both dropped, and at least three frames
+    are always kept. Returns (frames, runs, ghost scores, frames dropped).
+    """
+    T = frames.shape[0]
+    heavy = ghost > limit
+    keep = np.ones(T, bool)
+    for t in np.argsort(-ghost):
+        if heavy[t] and keep.sum() > 3 and keep[t - 1] and keep[(t + 1) % T]:
+            keep[t] = False
+    if keep.all():
+        return frames, runs, ghost, 0
+    runs = list(runs)
+    for t in np.nonzero(~keep)[0]:                 # its time goes to the kept frame before it
+        prev = next(i for i in ((t - k) % T for k in range(1, T)) if keep[i])
+        runs[prev] += runs[t]
+    return frames[keep], [r for r, k in zip(runs, keep) if k], ghost[keep], int((~keep).sum())
+
+
+def repair_ghosts(frames: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    """Paint over the ghost pixels of ghosted frames.
+
+    In a frame that stands out as ghosted, every pixel with a transient colour takes
+    the commonest value among its neighbours that have a normal colour (which may be
+    transparent). This is done from the outside of a patch inwards. Pixels with normal
+    colours are never touched, and neither are frames that are not ghosted.
+    Returns (frames, ghost score of each frame before the repair, frames repaired).
+    """
+    score = ghost_scores(frames)
+    bad = np.nonzero(_ghosted(score))[0]
+    if bad.size == 0:
+        return frames, score, 0
+    out = frames.copy()
+    transient = transient_pixels(frames)
+    H, W, C = frames.shape[1:]
+    shifts = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)]
+    for t in bad:
+        ids = _frame_ids(frames[t][None])[0].reshape(H, W)
+        todo = transient[t].copy()
+        for _ in range(3):
+            if not todo.any():
+                break
+            pi = np.pad(ids, 1, constant_values=-1)
+            pt = np.pad(todo, 1, constant_values=True)
+            new, left = ids.copy(), todo.copy()
+            for y, x in np.argwhere(todo):
+                good = [pi[1 + y + dy, 1 + x + dx] for dy, dx in shifts if not pt[1 + y + dy, 1 + x + dx]]
+                if len(good) >= 3:
+                    vals, counts = np.unique(good, return_counts=True)
+                    new[y, x] = vals[np.argmax(counts)]
+                    left[y, x] = False
+            ids, todo = new, left
+        out[t] = _unpack_ids(ids.reshape(-1), C).reshape(H, W, C)
+    return out, score, int(bad.size)
 
 
 VOTE_SAME = 0.10    # passes of a cycle this alike show the same drawing: vote pixel by pixel
 SWAP_CLOSE = 0.35   # a pass this alike may stand in for a ghosted pose of the cycle
-GHOST_HIGH = 1.5    # "ghosted" = this many times the animation's typical ghost score
 
 
 def vote_cycle(frames: np.ndarray, start: int, length: int, D: np.ndarray,
@@ -1246,7 +1377,8 @@ def vote_cycle(frames: np.ndarray, start: int, length: int, D: np.ndarray,
         without the ghost, that frame is used instead.
     Passes are never mixed unless they are the same drawing: generated video redraws the
     character on every pass, and mixing different drawings gives limbs from both.
-    Returns (cycle, poses voted, poses swapped).
+    Returns (cycle, poses voted, poses swapped). `ghost` is updated in place for a pose
+    that was swapped, so it then describes the frame now in the cycle.
     """
     T = frames.shape[0]
     ref = np.arange(start, start + length)
@@ -1255,7 +1387,7 @@ def vote_cycle(frames: np.ndarray, start: int, length: int, D: np.ndarray,
     if others.size == 0:
         return cycle, 0, 0
     nearest = D[np.ix_(others, ref)].argmin(1)
-    typical = float(np.median(ghost[1:-1])) if T > 2 else 0.0
+    ghosted = _ghosted(ghost)
     voted = swapped = 0
     for phase in range(length):
         r = start + phase
@@ -1270,12 +1402,13 @@ def vote_cycle(frames: np.ndarray, start: int, length: int, D: np.ndarray,
             voted += int((new != cycle[phase]).any())
             cycle[phase] = new
             continue
-        if ghost[r] <= max(GHOST_HIGH * typical, 0.02):
+        if not ghosted[r]:
             continue
-        clean = passes[(D[passes, r] <= SWAP_CLOSE) & (ghost[passes] < 0.5 * ghost[r])
-                       & (passes > 0) & (passes < T - 1)]       # end frames have no score
+        clean = passes[(D[passes, r] <= SWAP_CLOSE) & ~ghosted[passes] & (ghost[passes] < 0.5 * ghost[r])]
         if clean.size:
-            cycle[phase] = frames[min(clean, key=lambda t: (ghost[t], D[t, r]))]
+            t = min(clean, key=lambda t: (ghost[t], D[t, r]))
+            cycle[phase] = frames[t]
+            ghost[r] = ghost[t]
             swapped += 1
     return cycle, voted, swapped
 
@@ -1464,27 +1597,31 @@ def _ms(runs: list[int], fps: float) -> list[int]:
     return np.diff(np.concatenate([[0], cum])).tolist()
 
 
-def reduce_animation(frames: np.ndarray, args, fps: float,
-                     background: np.ndarray | None = None) -> tuple[np.ndarray, list[int], str]:
+def reduce_animation(frames: np.ndarray, args, fps: float) -> tuple[np.ndarray, list[int], str]:
     """Turn one animation (t, h, w, c) into its output frames: held poses become one
-    frame each, then --loop (with cross-cycle clean-up), --poses and repeat merging are
-    applied. Returns (frames, how many source frames each lasts, note for the report)."""
+    frame each, ghosted poses are repaired, then --loop (with cross-cycle clean-up),
+    --poses and repeat merging are applied.
+    Returns (frames, how many source frames each lasts, note for the report)."""
     notes = []
     runs = [1] * frames.shape[0]
     starts = None if args.no_hold else find_holds(frames)
     if starts:
         frames, runs = collapse_holds(frames, starts)
-        fps = fps / float(np.median(runs))
         notes.append(f"{len(runs)} poses held about {int(np.median(runs))} frames each")
     if (args.loop or args.poses) and frames.shape[0] > MAX_ANALYSIS_FRAMES:
         step = int(np.ceil(frames.shape[0] / MAX_ANALYSIS_FRAMES))
         runs = [sum(runs[i:i + step]) for i in range(0, len(runs), step)]
         frames = frames[::step]
-        fps /= step
-    ghost = ghost_scores(frames, background) if (args.loop or args.poses) else None
+    ghost = np.zeros(frames.shape[0])
+    heavy = np.inf                      # ghost score beyond which a pose is left out
+    if not args.no_repair and frames.shape[0] >= 4:
+        frames, ghost, repaired = repair_ghosts(frames)
+        heavy = GHOST_DROP * _ghost_limit(ghost)
+        if repaired:
+            notes.append(f"{repaired} ghosted repaired")
     if args.loop and frames.shape[0] >= 4:
         D = frame_distances(frames)
-        lp = find_loop(D, max(3, int(round(0.25 * fps))))
+        lp = find_loop(D, max(3, int(round(0.25 * fps))), runs)
         if lp:
             cycle = slice(lp[0], lp[0] + lp[1])
             notes.append(f"loop of {lp[1]}")
@@ -1496,9 +1633,13 @@ def reduce_animation(frames: np.ndarray, args, fps: float,
                     notes.append(f"{voted} voted across cycles")
                 if swapped:
                     notes.append(f"{swapped} ghosted swapped")
-            runs, ghost = runs[cycle], ghost_scores(frames, background)
+            runs, ghost = runs[cycle], ghost[cycle]
         else:
             notes.append("no loop found")
+    if not args.no_repair:
+        frames, runs, ghost, dropped = drop_ghosts(frames, runs, ghost, heavy)
+        if dropped:
+            notes.append(f"{dropped} ghosted dropped")
     if args.poses and frames.shape[0] > args.poses:
         segs = pick_poses(frame_distances(frames), args.poses, ghost)
         runs = [sum(runs[s:e]) for _, s, e in segs]
@@ -1692,7 +1833,7 @@ def process_video(args, opts: Options) -> int:
             crop = out[:, ys_, xs_].copy()
             crop[:, ~own] = 0
             a, b = active_span(crop, max(2, int(round(0.25 * fps))))
-            fr, fr_runs, note = reduce_animation(crop[a:b], args, fps, bg)
+            fr, fr_runs, note = reduce_animation(crop[a:b], args, fps)
             rows.append(fr)
             line = (f"  sprite {k}: {fr.shape[2]}x{fr.shape[1]} at {xs_.start},{ys_.start}  "
                     f"moves in frames {a + 1}-{b}"
@@ -1709,7 +1850,7 @@ def process_video(args, opts: Options) -> int:
             print(f"  -> {outp}  sheet of {sheet.shape[1] // cw}x{len(rows)} cells, each {cw}x{ch}, "
                   f"{ncolors(sheet)} colours")
     else:
-        fr, fr_runs, note = reduce_animation(out, args, fps, bg)
+        fr, fr_runs, note = reduce_animation(out, args, fps)
         write_frames(fr, "")
         if args.sheet:
             sheet, cw, ch = sheet_image([fr])
@@ -1821,6 +1962,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Recover true-resolution pixel art from an upscaled/JPEG image or video.")
     ap.add_argument("input", type=Path)
+    ap.add_argument("--version", action="version", version=f"repixel {__version__}")
     ap.add_argument("-o", "--output", type=Path,
                     help="output file (default: <input>_repixel.png; for video, a .gif "
                          "name writes a GIF instead of an animated PNG)")
@@ -1868,6 +2010,11 @@ def main(argv=None) -> int:
                          "(blurred in-between frames are never picked)")
     vg.add_argument("--loop", action="store_true",
                     help="find the repeating cycle (e.g. a walk cycle) and keep exactly one")
+    vg.add_argument("--no-repair", action="store_true",
+                    help="leave ghosted poses as they are. By default, in a pose that has many "
+                         "colours the animation uses nowhere else (a faint copy of another "
+                         "pose), those pixels are painted over from their neighbours, and a "
+                         "badly ghosted pose is left out")
     vg.add_argument("--no-vote", action="store_true",
                     help="with --loop: take the cycle exactly as one pass of it shows it. By "
                          "default the other passes are used to clean it up: identical passes "
